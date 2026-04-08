@@ -3,9 +3,20 @@ from discord.ext import commands
 from discord import SlashCommandGroup
 
 from utils import database as db
-from utils.display import chain_status_embed, ERROR_COLOR, CHAIN_COLOR, OK_COLOR
-from utils.words import is_valid, add_word, remove_word, word_count
-from game.chain import ChainGame
+from utils.display import (
+    chain_status_embed, words_by_letter_embed,
+    ERROR_COLOR, CHAIN_COLOR, OK_COLOR,
+)
+from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter
+from game.chain import ChainGame, VALID_MODES
+
+_MODE_LABELS = {
+    "last":   "last letter",
+    "random": "random letter (chosen from each word)",
+    "2nd":    "2nd letter",
+    "3rd":    "3rd letter (middle)",
+    "4th":    "4th letter",
+}
 
 
 class ChainCog(commands.Cog):
@@ -13,7 +24,17 @@ class ChainCog(commands.Cog):
 
     # ── /chain start ──────────────────────────────────────────────────────────
     @chain.command(name="start", description="Start a word-chain game in this channel")
-    async def start(self, ctx: discord.ApplicationContext):
+    async def start(
+        self,
+        ctx: discord.ApplicationContext,
+        mode: discord.Option(
+            str,
+            "How the next letter is chosen (default: last letter of each word)",
+            required=False,
+            default="last",
+            choices=["last", "random", "2nd", "3rd", "4th"],
+        ),  # type: ignore[valid-type]
+    ):
         await ctx.defer()
         if ctx.guild is None:
             await ctx.followup.send("Use this command inside a server.")
@@ -24,28 +45,32 @@ class ChainCog(commands.Cog):
         if existing:
             game  = ChainGame.from_db(existing)
             moves = await db.get_chain_moves(game.game_id)
-            embed = chain_status_embed(game.words_used, game.next_letter or "?", moves, game.game_id)
+            rem   = remaining_for_letter(game.next_letter, set(game.words_used)) if game.next_letter else None
+            embed = chain_status_embed(game.words_used, game.next_letter or "?", moves, game.game_id, rem, game.game_mode)
             embed.description = "⚠️ A chain game is already running in this channel!"
             await ctx.followup.send(embed=embed)
             return
 
-        game_id = await db.create_chain_game(gid, cid)
+        game_id = await db.create_chain_game(gid, cid, mode)
         await db.upsert_user(str(ctx.author.id), gid, ctx.author.display_name)
 
+        mode_desc = _MODE_LABELS.get(mode, mode)
         embed = discord.Embed(
             title=f"🔗 Word Chain Started — Game #{game_id}",
             colour=CHAIN_COLOR,
             description=(
                 "**How to play**\n"
                 "• `/chain play <word>` — add a 5-letter word to the chain\n"
-                "• Each word must **start with the last letter** of the previous word\n"
+                f"• Each word must start with the **{mode_desc}** of the previous word\n"
                 "  e.g. `SENSE` → `ENTER` → `ROVER` → `RANGE` → …\n"
                 "• Words must exist in the dictionary · no repeats · any player can join!\n\n"
-                "**Scoring** · +1 pt per valid word · +2 bonus every 5 words in the chain\n\n"
+                "**Scoring**\n"
+                "• ★☆☆ **Common** word = **+1 pt**  ·  ★★☆ **Moderate** = **+2 pts**  ·  ★★★ **Rare** = **+3 pts**\n"
+                "• **+2 milestone bonus** every 5 words in the chain\n\n"
                 "The first player can start with **any** valid 5-letter word."
             ),
         )
-        embed.set_footer(text=f"Game #{game_id} | /chain end to stop")
+        embed.set_footer(text=f"Game #{game_id} | Mode: {mode_desc} | /chain end to stop")
         await ctx.followup.send(embed=embed)
 
     # ── /chain play ───────────────────────────────────────────────────────────
@@ -85,21 +110,47 @@ class ChainCog(commands.Cog):
             await ctx.followup.send(embed=embed)
             return
 
-        points = game.play(word)
+        total, base_pts, tier_label, stars = game.play(word)
 
         await db.update_chain_game(game.game_id, game.words_used, game.next_letter or "")
         await db.add_chain_move(game.game_id, uid, ctx.author.display_name, word)
         await db.upsert_user(uid, gid, ctx.author.display_name)
-        await db.increment_stat(uid, gid, "chain_points", points)
+        await db.increment_stat(uid, gid, "chain_points", total)
         await db.increment_stat(uid, gid, "chain_words")
         await db.log_word(gid, uid, word)
 
+        remaining = (
+            remaining_for_letter(game.next_letter, set(game.words_used))
+            if game.next_letter else None
+        )
+
+        # Auto-end if no words remain for the required next letter
+        if remaining == 0:
+            await db.update_chain_game(
+                game.game_id, game.words_used, game.next_letter or "", "ended"
+            )
+            embed = discord.Embed(
+                title=f"🏁 Chain Complete — Game #{game.game_id}",
+                colour=discord.Colour.orange(),
+                description=(
+                    f"✅ **{ctx.author.display_name}** played `{word}` "
+                    f"({stars} **+{total} pt{'s' if total != 1 else ''}**)\n\n"
+                    f"💀 **No more words start with `{game.next_letter}`** — the dictionary is exhausted!\n"
+                    f"The chain ends here at **{game.chain_length}** word(s). Well played!\n\n"
+                    "Use `/chain start` to begin a new game."
+                ),
+            )
+            await ctx.followup.send(embed=embed)
+            return
+
         moves = await db.get_chain_moves(game.game_id)
-        embed = chain_status_embed(game.words_used, game.next_letter or "?", moves, game.game_id)
-        bonus_note = " *(+2 chain bonus!)*" if points > 1 else ""
+        embed = chain_status_embed(
+            game.words_used, game.next_letter or "?", moves, game.game_id, remaining, game.game_mode
+        )
+        milestone_note = " *(+2 milestone bonus!)*" if total > base_pts else ""
         embed.description = (
             f"✅ **{ctx.author.display_name}** played `{word}` "
-            f"— **+{points} pt{'s' if points != 1 else ''}**{bonus_note}"
+            f"— {stars} **+{total} pt{'s' if total != 1 else ''}**{milestone_note}"
         )
         await ctx.followup.send(embed=embed)
 
@@ -118,9 +169,49 @@ class ChainCog(commands.Cog):
 
         game  = ChainGame.from_db(row)
         moves = await db.get_chain_moves(game.game_id)
-        embed = chain_status_embed(
-            game.words_used, game.next_letter or "any letter", moves, game.game_id
+        rem   = (
+            remaining_for_letter(game.next_letter, set(game.words_used))
+            if game.next_letter else None
         )
+        embed = chain_status_embed(
+            game.words_used, game.next_letter or "any letter", moves, game.game_id, rem, game.game_mode
+        )
+        await ctx.followup.send(embed=embed)
+
+    # ── /chain words ──────────────────────────────────────────────────────────
+    @chain.command(
+        name="words",
+        description="List words used starting with a specific letter, plus how many remain",
+    )
+    async def words_cmd(
+        self,
+        ctx: discord.ApplicationContext,
+        letter: discord.Option(
+            str, "Single letter (A–Z)", required=True, min_length=1, max_length=1
+        ),  # type: ignore[valid-type]
+    ):
+        await ctx.defer()
+        if ctx.guild is None:
+            await ctx.followup.send("Use this command inside a server.")
+            return
+
+        letter = letter.strip().upper()
+        if not letter.isalpha():
+            await ctx.followup.send("Please provide a single letter (A–Z).", ephemeral=True)
+            return
+
+        row = await db.get_active_chain(str(ctx.guild.id), str(ctx.channel.id))
+        if not row:
+            await ctx.followup.send("No active chain game here. Use `/chain start` to begin.")
+            return
+
+        game  = ChainGame.from_db(row)
+        moves = await db.get_chain_moves(game.game_id)
+
+        letter_moves = [m for m in moves if m["word"].upper().startswith(letter)]
+        remaining    = remaining_for_letter(letter, set(game.words_used))
+
+        embed = words_by_letter_embed(letter, letter_moves, remaining, game.game_id)
         await ctx.followup.send(embed=embed)
 
     # ── /chain end ────────────────────────────────────────────────────────────
@@ -169,21 +260,26 @@ class ChainCog(commands.Cog):
             description=(
                 "A multiplayer word-linking game using 5-letter words.\n\n"
                 "**Rules**\n"
-                "• Each word must start with the **last letter** of the previous word\n"
+                "• Each word must start with the letter determined by the **game mode**\n"
                 "  `SENSE` → `ENTER` → `ROVER` → `RANGE` → `EMBER` → …\n"
                 "• Words must be valid 5-letter English words (in the dictionary)\n"
                 "• No repeating words in the same game\n"
                 "• Any player can join — just use `/chain play`\n\n"
-                "**Scoring**\n"
-                "• **+1 pt** per valid word\n"
-                "• **+2 bonus pts** every time the chain hits a multiple of 5\n\n"
+                "**Scoring** *(Scrabble-style letter rarity)*\n"
+                "• ★☆☆ **Common** word (Scrabble sum ≤ 7) = **+1 pt**\n"
+                "• ★★☆ **Moderate** word (sum 8–12) = **+2 pts**\n"
+                "• ★★★ **Rare** word (sum ≥ 13) = **+3 pts**\n"
+                "• **+2 milestone bonus** every 5 words added to the chain\n\n"
+                "**Game Modes** (choose at `/chain start`)\n"
+                "`last` *(default)* — next word starts with the **last** letter\n"
+                "`random` — a **random** letter from the word is chosen next\n"
+                "`2nd` / `3rd` / `4th` — specific position's letter is used\n\n"
                 "**Commands**\n"
-                "`/chain start` — start a game in this channel\n"
+                "`/chain start [mode]` — start a game\n"
                 "`/chain play <word>` — add a word\n"
-                "`/chain status` — view the current chain\n"
+                "`/chain status` — view the current chain and remaining words\n"
+                "`/chain words <letter>` — see words used for a letter + how many are left\n"
                 "`/chain end` — end and show results\n"
-                "`/addword <word>` — add a missing word *(admin only)*\n"
-                "`/removeword <word>` — remove a word *(admin only)*\n"
                 "`/checkword <word>` — check if a word is in the dictionary\n"
             ),
         )

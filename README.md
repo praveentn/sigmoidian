@@ -1,19 +1,20 @@
 # Sigmoidian
 
-A multiplayer Discord bot built with [PyCord](https://pycord.dev/) that hosts a **Word Chain** game — a collaborative challenge where each word must start with the last letter of the previous word.
+Sigmoidian is a multiplayer Discord word-chain bot where players collaborate to build chains of 5-letter words. Each word must start with the next letter determined by the game mode. Words score 1–3 pts based on letter rarity (Scrabble-style), with +2 milestone bonuses every 5 moves. Compete on leaderboards, track stats, and race the clock before the dictionary runs dry.
 
 ## How to Play
 
-Players take turns adding 5-letter words to a growing chain. Each word must begin with the **last letter** of the previous word:
+Players take turns adding 5-letter words to a growing chain. Each word must begin with the letter determined by the **game mode** (last letter by default):
 
 ```
 SENSE → ENTER → ROVER → RANGE → EMBER → ...
 ```
 
-- Words must be valid 5-letter English words
+- Words must be valid 5-letter English words (5,900+ word dictionary)
 - No repeating words in the same game
 - Any server member can join — just use `/chain play`
-- **Scoring:** +1 pt per valid word · +2 bonus pts every 5 words in the chain
+- **Scoring:** words earn 1–3 pts based on letter rarity · +2 milestone bonus every 5 words
+- **Modes:** `last` (default), `random`, `2nd`, `3rd`, `4th` letter
 
 ---
 
@@ -23,11 +24,12 @@ SENSE → ENTER → ROVER → RANGE → EMBER → ...
 
 | Command | Description |
 |---------|-------------|
-| `/chain start` | Start a new chain game in this channel |
+| `/chain start [mode]` | Start a new chain game (optional mode: `last`/`random`/`2nd`/`3rd`/`4th`) |
 | `/chain play <word>` | Add a word to the active chain |
-| `/chain status` | View the current chain and participants |
+| `/chain status` | View the current chain, next letter, and words remaining |
+| `/chain words <letter>` | List words used starting with a letter + how many are left |
 | `/chain end` | End the game and show per-player results |
-| `/chain help` | Rules and scoring recap |
+| `/chain help` | Rules, scoring, and mode reference |
 
 ### Stats
 
@@ -45,6 +47,28 @@ SENSE → ENTER → ROVER → RANGE → EMBER → ...
 | `/addword <word>` | Add a missing word to the dictionary |
 | `/removeword <word>` | Remove a word from the dictionary |
 | `/checkword <word>` | Check if a word is accepted |
+
+### Scoring
+
+Words are scored by **letter rarity** using Scrabble tile values:
+
+| Tier | Scrabble letter sum | Points |
+|------|---------------------|--------|
+| ★☆☆ Common | ≤ 7 | +1 pt |
+| ★★☆ Moderate | 8–12 | +2 pts |
+| ★★★ Rare | ≥ 13 | +3 pts |
+
+Plus a **+2 milestone bonus** every 5 words added to the chain.
+
+### Game Modes
+
+| Mode | Next letter comes from… |
+|------|------------------------|
+| `last` *(default)* | Last letter of the word |
+| `random` | A random letter from the word (prefers letters with remaining words) |
+| `2nd` | Second letter |
+| `3rd` | Third (middle) letter |
+| `4th` | Fourth letter |
 
 ---
 
@@ -124,7 +148,7 @@ The dashboard shows connection status, guild count, latency, and uptime. It auto
 
 ## Dictionary
 
-The word list lives in `data/words.txt` — one uppercase word per line, sorted alphabetically. It ships with **3,300+** valid 5-letter English words.
+The word list lives in `data/words.txt` — one uppercase word per line, sorted alphabetically. It ships with **5,900+** valid 5-letter English words, merged from multiple public word lists.
 
 To add words permanently, either:
 - Use `/addword <word>` in Discord (admin only) — writes to the file immediately

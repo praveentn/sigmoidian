@@ -9,6 +9,16 @@ from config import DB_PATH
 
 async def _migrate(db) -> None:
     """One-time migrations for schema changes between versions."""
+    # chain_games: add game_mode column if missing
+    async with db.execute("PRAGMA table_info(chain_games)") as cur:
+        gcols = {row[1] for row in await cur.fetchall()}
+    if gcols and "game_mode" not in gcols:
+        await db.execute(
+            "ALTER TABLE chain_games ADD COLUMN game_mode TEXT NOT NULL DEFAULT 'last'"
+        )
+        await db.commit()
+        print("    DB migration : added game_mode column to chain_games")
+
     # word_log previously had `game_mode TEXT NOT NULL`; rebuild without it.
     async with db.execute("PRAGMA table_info(word_log)") as cur:
         cols = {row[1] for row in await cur.fetchall()}
@@ -64,6 +74,7 @@ async def init_db() -> None:
                 channel_id  TEXT NOT NULL,
                 words_used  TEXT NOT NULL DEFAULT '[]',
                 next_letter TEXT,
+                game_mode   TEXT NOT NULL DEFAULT 'last',
                 status      TEXT NOT NULL DEFAULT 'active',
                 created_at  TEXT DEFAULT (datetime('now'))
             );
@@ -111,11 +122,11 @@ async def get_active_chain(guild_id: str, channel_id: str) -> dict | None:
             return dict(row) if row else None
 
 
-async def create_chain_game(guild_id: str, channel_id: str) -> int:
+async def create_chain_game(guild_id: str, channel_id: str, game_mode: str = "last") -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "INSERT INTO chain_games (guild_id, channel_id) VALUES (?,?)",
-            (guild_id, channel_id),
+            "INSERT INTO chain_games (guild_id, channel_id, game_mode) VALUES (?,?,?)",
+            (guild_id, channel_id, game_mode),
         ) as cur:
             game_id = cur.lastrowid
         await db.commit()
