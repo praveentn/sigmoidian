@@ -39,8 +39,9 @@ echo   [sigmoidian] Port   : %PORT%
 
 :: ── Detect python command ────────────────────────────────────
 set PYTHON_CMD=
-where python  >nul 2>&1 && set PYTHON_CMD=python
-where python3 >nul 2>&1 && set PYTHON_CMD=python3
+where python  >nul 2>&1 && python  -c "import sys" >nul 2>&1 && set PYTHON_CMD=python
+where python3 >nul 2>&1 && python3 -c "import sys" >nul 2>&1 && set PYTHON_CMD=python3
+where py      >nul 2>&1 && py      -c "import sys" >nul 2>&1 && set PYTHON_CMD=py
 if not defined PYTHON_CMD (
     echo   [sigmoidian] ERROR: Python not found in PATH.
     echo   Install Python 3.10+ from https://python.org
