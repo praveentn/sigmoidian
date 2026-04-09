@@ -68,6 +68,32 @@ def word_score(word: str) -> tuple[int, str, str]:
         return 3, "Rare", "★★★"
 
 
+def get_hints(
+    letter: str, used_words: set[str], max_hints: int = 3
+) -> list[tuple[str, int, str, str]]:
+    """
+    Return up to `max_hints` playable words starting with `letter`.
+    Tries to return one word per difficulty tier (Common / Moderate / Rare).
+    Each entry is (word, base_pts, tier_label, stars).
+    """
+    available = LETTER_INDEX.get(letter.upper(), set()) - used_words
+    if not available:
+        return []
+
+    by_tier: dict[int, list[str]] = {1: [], 2: [], 3: []}
+    for w in available:
+        pts, _, _ = word_score(w)
+        by_tier[pts].append(w)
+
+    hints: list[tuple[str, int, str, str]] = []
+    for tier_pts in [1, 2, 3]:
+        if by_tier[tier_pts] and len(hints) < max_hints:
+            w = _random.choice(by_tier[tier_pts])
+            pts, label, stars = word_score(w)
+            hints.append((w, pts, label, stars))
+    return hints
+
+
 def remaining_for_letter(letter: str, used_words: set[str]) -> int:
     """Count valid words starting with `letter` that haven't been used yet."""
     available = LETTER_INDEX.get(letter.upper(), set())

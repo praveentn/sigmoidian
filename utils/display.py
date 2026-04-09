@@ -14,6 +14,21 @@ _MODE_LABELS = {
     "4th":    "4th letter",
 }
 
+_FIELD_LIMIT = 1024
+
+
+def _fit_field(lines: list[str], limit: int = _FIELD_LIMIT) -> str:
+    """Join lines into a field value, truncating with a count if it would exceed `limit`."""
+    result = ""
+    for i, line in enumerate(lines):
+        chunk = (line + "\n")
+        if len(result) + len(chunk) > limit - 20:  # leave room for overflow note
+            overflow = len(lines) - i
+            result += f"… +{overflow} more"
+            break
+        result += chunk
+    return result.strip() or "—"
+
 
 def _remaining_indicator(remaining: int, next_letter: str) -> str:
     """Format the words-remaining line with a colour-coded status indicator."""
@@ -92,7 +107,7 @@ def words_by_letter_embed(
         lines = [f"`{m['word']}` — **{m['username']}**" for m in moves]
         embed.add_field(
             name=f"Used in this game ({len(moves)})",
-            value="\n".join(lines),
+            value=_fit_field(lines),
             inline=True,
         )
     else:
@@ -108,6 +123,43 @@ def words_by_letter_embed(
         inline=True,
     )
     embed.set_footer(text=f"Game #{game_id} | {len(moves)} used · {remaining} remaining")
+    return embed
+
+
+def _mask_word(word: str) -> str:
+    """Reveal only the 2nd letter; mask the rest with underscores.
+    e.g. ENTER → E N _ _ _   (1st letter already known from game state)
+    """
+    return " ".join(c if i < 2 else "_" for i, c in enumerate(word.upper()))
+
+
+def hint_embed(
+    letter: str,
+    hints: list[tuple[str, int, str, str]],
+    remaining: int,
+    game_id: int,
+    requester: str = "",
+) -> discord.Embed:
+    """Hint suggestions — each word is shown with only the 2nd letter revealed."""
+    letter = letter.upper()
+    embed = discord.Embed(
+        title=f"💡 Hint — Game #{game_id}",
+        colour=CHAIN_COLOR,
+    )
+    if not hints:
+        embed.description = f"No unused words starting with **{letter}** remain in the dictionary."
+        return embed
+
+    lines = [
+        f"{stars} `{_mask_word(word)}` — {label} (+{pts} pt{'s' if pts != 1 else ''})"
+        for word, pts, label, stars in hints
+    ]
+    who = f"**{requester}** asked for a hint" if requester else "Hint requested"
+    embed.description = (
+        f"{who} — words starting with **{letter}**, second letter revealed:\n\n"
+        + "\n".join(lines)
+    )
+    embed.set_footer(text=_remaining_indicator(remaining, letter))
     return embed
 
 

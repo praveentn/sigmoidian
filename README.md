@@ -28,6 +28,7 @@ SENSE → ENTER → ROVER → RANGE → EMBER → ...
 | `/chain play <word>` | Add a word to the active chain |
 | `/chain status` | View the current chain, next letter, and words remaining |
 | `/chain words <letter>` | List words used starting with a letter + how many are left |
+| `/chain hint` | Ask for a hint — reveals the 2nd letter of valid words (e.g. `E N _ _ _`), **visible to all** |
 | `/chain end` | End the game and show per-player results |
 | `/chain help` | Rules, scoring, and mode reference |
 
@@ -69,6 +70,19 @@ Plus a **+2 milestone bonus** every 5 words added to the chain.
 | `2nd` | Second letter |
 | `3rd` | Third (middle) letter |
 | `4th` | Fourth letter |
+
+### Hints
+
+`/chain hint` is **visible to everyone in the channel** — so using it is a public admission of being stuck. It picks one word per difficulty tier and reveals only the **2nd letter** (the starting letter is already shown in the game state):
+
+```
+Words starting with E — second letter revealed:
+★☆☆  E N _ _ _  — Common  (+1 pt)
+★★☆  E H _ _ _  — Moderate (+2 pts)
+★★★  E X _ _ _  — Rare    (+3 pts)
+```
+
+Each call picks a fresh random word per tier.
 
 ---
 

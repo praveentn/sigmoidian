@@ -4,10 +4,10 @@ from discord import SlashCommandGroup
 
 from utils import database as db
 from utils.display import (
-    chain_status_embed, words_by_letter_embed,
+    chain_status_embed, words_by_letter_embed, hint_embed,
     ERROR_COLOR, CHAIN_COLOR, OK_COLOR,
 )
-from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter
+from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter, get_hints
 from game.chain import ChainGame, VALID_MODES
 
 _MODE_LABELS = {
@@ -214,6 +214,37 @@ class ChainCog(commands.Cog):
         embed = words_by_letter_embed(letter, letter_moves, remaining, game.game_id)
         await ctx.followup.send(embed=embed)
 
+    # ── /chain hint ───────────────────────────────────────────────────────────
+    @chain.command(
+        name="hint",
+        description="Ask for a hint — reveals one letter of a valid word (visible to all)",
+    )
+    async def hint(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
+        if ctx.guild is None:
+            await ctx.followup.send("Use this command inside a server.")
+            return
+
+        row = await db.get_active_chain(str(ctx.guild.id), str(ctx.channel.id))
+        if not row:
+            await ctx.followup.send(
+                "No active chain game here. Use `/chain start` to begin."
+            )
+            return
+
+        game = ChainGame.from_db(row)
+        if not game.next_letter:
+            await ctx.followup.send(
+                "The game just started — any valid 5-letter word works!"
+            )
+            return
+
+        used   = set(game.words_used)
+        hints  = get_hints(game.next_letter, used)
+        rem    = remaining_for_letter(game.next_letter, used)
+        embed  = hint_embed(game.next_letter, hints, rem, game.game_id, ctx.author.display_name)
+        await ctx.followup.send(embed=embed)
+
     # ── /chain end ────────────────────────────────────────────────────────────
     @chain.command(name="end", description="End the active chain game in this channel")
     async def end(self, ctx: discord.ApplicationContext):
@@ -279,6 +310,7 @@ class ChainCog(commands.Cog):
                 "`/chain play <word>` — add a word\n"
                 "`/chain status` — view the current chain and remaining words\n"
                 "`/chain words <letter>` — see words used for a letter + how many are left\n"
+                "`/chain hint` — ask for a hint (visible to all — use wisely!)\n"
                 "`/chain end` — end and show results\n"
                 "`/checkword <word>` — check if a word is in the dictionary\n"
             ),
