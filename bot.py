@@ -147,6 +147,22 @@ async def on_ready():
     print(f"    Guilds  : {len(bot.guilds)}")
     print("    DB      : initialised")
 
+    # When switching from guild→global commands the old guild-scoped commands
+    # stay registered on Discord indefinitely. Purge them so only the global
+    # commands show up. (Global propagation can take up to 1 hour after deploy.)
+    if DEBUG_GUILDS is None:
+        cleared = []
+        for guild in bot.guilds:
+            try:
+                await bot.http.bulk_upsert_guild_commands(
+                    bot.application_id, guild.id, []
+                )
+                cleared.append(guild.name)
+            except discord.Forbidden:
+                pass  # bot lacks manage-guild perms in this server
+        if cleared:
+            print(f"    Stale guild commands cleared from: {', '.join(cleared)}")
+
 
 @bot.event
 async def on_application_command_error(ctx: discord.ApplicationContext, error):
