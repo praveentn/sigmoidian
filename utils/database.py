@@ -39,6 +39,16 @@ async def _migrate(db) -> None:
         await db.commit()
         print("    DB migration : removed game_mode column from word_log")
 
+    # user_stats: add longest_chain column if missing
+    async with db.execute("PRAGMA table_info(user_stats)") as cur:
+        ucols_lc = {row[1] for row in await cur.fetchall()}
+    if ucols_lc and "longest_chain" not in ucols_lc:
+        await db.execute(
+            "ALTER TABLE user_stats ADD COLUMN longest_chain INTEGER DEFAULT 0"
+        )
+        await db.commit()
+        print("    DB migration : added longest_chain column to user_stats")
+
     # user_stats previously had wordle_wins / wordle_losses columns; drop them if present.
     async with db.execute("PRAGMA table_info(user_stats)") as cur:
         ucols = {row[1] for row in await cur.fetchall()}
@@ -89,11 +99,12 @@ async def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS user_stats (
-                user_id      TEXT NOT NULL,
-                guild_id     TEXT NOT NULL,
-                username     TEXT,
-                chain_points INTEGER DEFAULT 0,
-                chain_words  INTEGER DEFAULT 0,
+                user_id        TEXT NOT NULL,
+                guild_id       TEXT NOT NULL,
+                username       TEXT,
+                chain_points   INTEGER DEFAULT 0,
+                chain_words    INTEGER DEFAULT 0,
+                longest_chain  INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, guild_id)
             );
 
@@ -216,6 +227,43 @@ async def log_word(guild_id: str, user_id: str, word: str) -> None:
             (guild_id, user_id, word),
         )
         await db.commit()
+
+
+async def update_longest_chain(user_id: str, guild_id: str, chain_length: int) -> None:
+    """Update a player's personal best chain length if this game was longer."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE user_stats SET longest_chain = MAX(longest_chain, ?) "
+            "WHERE user_id=? AND guild_id=?",
+            (chain_length, user_id, guild_id),
+        )
+        await db.commit()
+
+
+async def get_top_chains(guild_id: str, limit: int = 10) -> list[dict]:
+    """Return top N completed games by chain length for a guild."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT
+                g.id,
+                g.game_mode,
+                json_array_length(g.words_used) AS length,
+                date(g.created_at)              AS date,
+                (SELECT m.username FROM chain_moves m
+                 WHERE m.game_id = g.id
+                 GROUP BY m.user_id
+                 ORDER BY COUNT(*) DESC LIMIT 1) AS top_player
+            FROM chain_games g
+            WHERE g.guild_id = ? AND g.status = 'ended'
+              AND json_array_length(g.words_used) > 0
+            ORDER BY length DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_top_words(guild_id: str, limit: int = 15) -> list[dict]:

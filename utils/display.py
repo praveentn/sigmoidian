@@ -1,4 +1,5 @@
 import discord
+import random as _random
 from typing import List
 
 CHAIN_COLOR = discord.Colour.blurple()
@@ -127,10 +128,14 @@ def words_by_letter_embed(
 
 
 def _mask_word(word: str) -> str:
-    """Reveal only the 2nd letter; mask the rest with underscores.
-    e.g. ENTER → E N _ _ _   (1st letter already known from game state)
+    """Reveal 3 letters: position 0 (always) + 2 random from positions 1–4.
+    e.g. YEAST → Y _ A _ T  (positions 0, 2, 4 revealed)
     """
-    return " ".join(c if i < 2 else "_" for i, c in enumerate(word.upper()))
+    word = word.upper()
+    other_indices = list(range(1, len(word)))
+    extra = _random.sample(other_indices, min(2, len(other_indices)))
+    reveal = {0} | set(extra)
+    return " ".join(c if i in reveal else "_" for i, c in enumerate(word))
 
 
 def hint_embed(
@@ -156,22 +161,72 @@ def hint_embed(
     ]
     who = f"**{requester}** asked for a hint" if requester else "Hint requested"
     embed.description = (
-        f"{who} — words starting with **{letter}**, second letter revealed:\n\n"
+        f"{who} — words starting with **{letter}**, 3 letters revealed:\n\n"
         + "\n".join(lines)
     )
     embed.set_footer(text=_remaining_indicator(remaining, letter))
     return embed
 
 
+def chain_end_embed(
+    game_id: int,
+    chain_length: int,
+    tally: dict[str, list[str]],
+) -> discord.Embed:
+    """Summary embed for /chain end — safe against Discord's 4096-char description limit."""
+    embed = discord.Embed(
+        title=f"🔗 Chain Ended — Game #{game_id}",
+        colour=CHAIN_COLOR,
+        description=f"Chain length: **{chain_length}** word(s)",
+    )
+
+    if not tally:
+        embed.add_field(name="Player Summary", value="No moves were made.", inline=False)
+        return embed
+
+    lines = [
+        f"**{name}** — {len(words)} word(s): {', '.join(f'`{w}`' for w in words)}"
+        for name, words in sorted(tally.items(), key=lambda x: -len(x[1]))
+    ]
+    embed.add_field(name="Player Summary", value=_fit_field(lines), inline=False)
+    return embed
+
+
+def chain_recap_embed(words: list[str], game_id: int, page: int, words_per_page: int = 50) -> discord.Embed:
+    """One page of the full chain word list, safe against all Discord limits."""
+    total = len(words)
+    total_pages = max(1, (total + words_per_page - 1) // words_per_page)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * words_per_page
+    end   = min(start + words_per_page, total)
+    chunk = words[start:end]
+
+    # Each word: bold 5 chars + " → " = ~9 chars; 50 words ≈ 450 chars — well within 4096
+    chain_str = " → ".join(f"**{w}**" for w in chunk)
+    if start > 0:
+        chain_str = "… → " + chain_str
+
+    embed = discord.Embed(
+        title=f"📜 Chain Recap — Game #{game_id}",
+        description=chain_str or "No words yet.",
+        colour=CHAIN_COLOR,
+    )
+    embed.set_footer(text=f"Words {start + 1}–{end} of {total} | Page {page + 1}/{total_pages}")
+    return embed
+
+
 def stats_embed(stats: dict, username: str) -> discord.Embed:
     pts   = stats.get("chain_points", 0)
     words = stats.get("chain_words", 0)
+    best  = stats.get("longest_chain", 0)
 
     embed = discord.Embed(title=f"📊 Stats — {username}", colour=STATS_COLOR)
     embed.add_field(name="Chain Points", value=str(pts),   inline=True)
     embed.add_field(name="Words Played", value=str(words), inline=True)
     avg = f"{pts/words:.2f}" if words else "—"
     embed.add_field(name="Avg pts/word", value=avg,        inline=True)
+    embed.add_field(name="Longest Chain", value=str(best) if best else "—", inline=True)
     return embed
 
 
@@ -191,6 +246,30 @@ def leaderboard_embed(rows: List[dict], guild_name: str) -> discord.Embed:
             f"{row.get('chain_points', 0)} pts · "
             f"{row.get('chain_words', 0)} words"
         )
+    embed.description = "\n".join(lines)
+    return embed
+
+
+def top_chains_embed(rows: List[dict], guild_name: str) -> discord.Embed:
+    """Top completed chain games by length for a guild."""
+    embed = discord.Embed(title=f"🏆 Longest Chains — {guild_name}", colour=STATS_COLOR)
+    if not rows:
+        embed.description = "No completed chains yet. Use `/chain start` to play!"
+        return embed
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = []
+    for i, row in enumerate(rows):
+        prefix    = medals[i] if i < 3 else f"**{i + 1}.**"
+        mode      = _MODE_LABELS.get(row.get("game_mode", "last"), row.get("game_mode", ""))
+        top_note  = f" — led by **{row['top_player']}**" if row.get("top_player") else ""
+        date_note = f" · {row['date']}" if row.get("date") else ""
+        lines.append(
+            f"{prefix} Game **#{row['id']}** — **{row['length']}** words{top_note}\n"
+            f"   {mode}{date_note}"
+        )
+
+    # Each entry ~80 chars, 10 entries ≈ 800 chars — safe within 4096
     embed.description = "\n".join(lines)
     return embed
 

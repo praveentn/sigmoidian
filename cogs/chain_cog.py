@@ -4,11 +4,110 @@ from discord import SlashCommandGroup
 
 from utils import database as db
 from utils.display import (
-    chain_status_embed, words_by_letter_embed, hint_embed,
+    chain_status_embed, hint_embed, chain_end_embed,
+    chain_recap_embed, top_chains_embed, _remaining_indicator,
     ERROR_COLOR, CHAIN_COLOR, OK_COLOR,
 )
 from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter, get_hints
 from game.chain import ChainGame, VALID_MODES
+
+# ── Paginated views ────────────────────────────────────────────────────────────
+
+class ChainRecapView(discord.ui.View):
+    """Paginated view of all words in a chain — 50 words per page."""
+    WORDS_PER_PAGE = 50
+
+    def __init__(self, words: list[str], game_id: int):
+        super().__init__(timeout=300)
+        self.words       = words
+        self.game_id     = game_id
+        self.page        = 0
+        self.total_pages = max(1, (len(words) + self.WORDS_PER_PAGE - 1) // self.WORDS_PER_PAGE)
+        self._sync()
+
+    def _sync(self):
+        self.prev_btn.disabled = (self.page == 0)
+        self.next_btn.disabled = (self.page >= self.total_pages - 1)
+
+    def build_embed(self) -> discord.Embed:
+        return chain_recap_embed(self.words, self.game_id, self.page, self.WORDS_PER_PAGE)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.page -= 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.page += 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+class LetterWordsView(discord.ui.View):
+    """Paginated view of all words used for a specific starting letter — 15 per page."""
+    WORDS_PER_PAGE = 15
+
+    def __init__(self, letter: str, moves: list[dict], remaining: int, game_id: int):
+        super().__init__(timeout=300)
+        self.letter      = letter.upper()
+        self.moves       = moves
+        self.remaining   = remaining
+        self.game_id     = game_id
+        self.page        = 0
+        self.total_pages = max(1, (len(moves) + self.WORDS_PER_PAGE - 1) // self.WORDS_PER_PAGE)
+        self._sync()
+
+    def _sync(self):
+        self.prev_btn.disabled = (self.page == 0)
+        self.next_btn.disabled = (self.page >= self.total_pages - 1)
+
+    def build_embed(self) -> discord.Embed:
+        start      = self.page * self.WORDS_PER_PAGE
+        end        = min(start + self.WORDS_PER_PAGE, len(self.moves))
+        page_moves = self.moves[start:end]
+
+        embed = discord.Embed(
+            title=f"🔤 Words Starting with {self.letter} — Game #{self.game_id}",
+            colour=CHAIN_COLOR,
+        )
+        if page_moves:
+            # 15 lines × ~30 chars ≈ 450 chars — safe within 1024 field limit
+            lines = [f"`{m['word']}` — **{m['username']}**" for m in page_moves]
+            embed.add_field(
+                name=f"Words {start + 1}–{end} of {len(self.moves)}",
+                value="\n".join(lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(name=f"Used (0)", value="None yet.", inline=False)
+
+        embed.add_field(
+            name="Still available",
+            value=_remaining_indicator(self.remaining, self.letter),
+            inline=False,
+        )
+        page_note = f" | Page {self.page + 1}/{self.total_pages}" if self.total_pages > 1 else ""
+        embed.set_footer(
+            text=f"Game #{self.game_id} | {len(self.moves)} used · {self.remaining} remaining{page_note}"
+        )
+        return embed
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.page -= 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.page += 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+# ───────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS = {
     "last":   "last letter",
@@ -115,7 +214,21 @@ class ChainCog(commands.Cog):
         await db.update_chain_game(game.game_id, game.words_used, game.next_letter or "")
         await db.add_chain_move(game.game_id, uid, ctx.author.display_name, word)
         await db.upsert_user(uid, gid, ctx.author.display_name)
-        await db.increment_stat(uid, gid, "chain_points", total)
+
+        # Fetch moves (includes the just-added move at the end)
+        moves = await db.get_chain_moves(game.game_id)
+
+        # ── Streak bonus: +1 if player played the previous word too ──────────
+        streak_count = 0
+        for m in reversed(moves[:-1]):   # look at moves before this one
+            if m["user_id"] == uid:
+                streak_count += 1
+            else:
+                break
+        streak_bonus = 1 if streak_count >= 1 else 0
+        total_final  = total + streak_bonus
+
+        await db.increment_stat(uid, gid, "chain_points", total_final)
         await db.increment_stat(uid, gid, "chain_words")
         await db.log_word(gid, uid, word)
 
@@ -124,35 +237,65 @@ class ChainCog(commands.Cog):
             if game.next_letter else None
         )
 
-        # Auto-end if no words remain for the required next letter
+        # ── Auto-end: no words remain for the required next letter ───────────
         if remaining == 0:
             await db.update_chain_game(
                 game.game_id, game.words_used, game.next_letter or "", "ended"
             )
+            # Update personal bests for all participants
+            seen: set[str] = set()
+            for m in moves:
+                if m["user_id"] not in seen:
+                    seen.add(m["user_id"])
+                    await db.update_longest_chain(m["user_id"], gid, game.chain_length)
+
+            milestone_note = " *(+2 milestone bonus!)*" if total > base_pts else ""
+            streak_note    = f" 🔥 *+1 streak ({streak_count + 1} in a row!)*" if streak_bonus else ""
             embed = discord.Embed(
                 title=f"🏁 Chain Complete — Game #{game.game_id}",
                 colour=discord.Colour.orange(),
                 description=(
                     f"✅ **{ctx.author.display_name}** played `{word}` "
-                    f"({stars} **+{total} pt{'s' if total != 1 else ''}**)\n\n"
+                    f"({stars} **+{total_final} pt{'s' if total_final != 1 else ''}**)"
+                    f"{milestone_note}{streak_note}\n\n"
                     f"💀 **No more words start with `{game.next_letter}`** — the dictionary is exhausted!\n"
                     f"The chain ends here at **{game.chain_length}** word(s). Well played!\n\n"
                     "Use `/chain start` to begin a new game."
                 ),
             )
             await ctx.followup.send(embed=embed)
+            if game.chain_length > 0:
+                recap_view = ChainRecapView(game.words_used, game.game_id)
+                await ctx.channel.send(
+                    "📜 **Final Chain Recap:**",
+                    embed=recap_view.build_embed(),
+                    view=recap_view if recap_view.total_pages > 1 else None,
+                )
             return
 
-        moves = await db.get_chain_moves(game.game_id)
+        # ── Normal play response ──────────────────────────────────────────────
         embed = chain_status_embed(
             game.words_used, game.next_letter or "?", moves, game.game_id, remaining, game.game_mode
         )
         milestone_note = " *(+2 milestone bonus!)*" if total > base_pts else ""
-        embed.description = (
+        streak_note    = f" 🔥 *+1 streak ({streak_count + 1} in a row!)*" if streak_bonus else ""
+        desc = (
             f"✅ **{ctx.author.display_name}** played `{word}` "
-            f"— {stars} **+{total} pt{'s' if total != 1 else ''}**{milestone_note}"
+            f"— {stars} **+{total_final} pt{'s' if total_final != 1 else ''}**{milestone_note}{streak_note}"
         )
+        if stars == "★★★":
+            desc += f"\n✨ **Rare word spotlight!** `{word}` — {tier_label}, {base_pts} base pts."
+        embed.description = desc
         await ctx.followup.send(embed=embed)
+
+        # ── Milestone recap every 100 words ───────────────────────────────────
+        if game.chain_length % 100 == 0:
+            recap_view = ChainRecapView(game.words_used, game.game_id)
+            await ctx.channel.send(
+                f"🎉 **{game.chain_length}-word milestone!** Here's the chain so far:",
+                embed=recap_view.build_embed(),
+                view=recap_view if recap_view.total_pages > 1 else None,
+            )
 
     # ── /chain status ─────────────────────────────────────────────────────────
     @chain.command(name="status", description="Show the current word chain")
@@ -211,8 +354,11 @@ class ChainCog(commands.Cog):
         letter_moves = [m for m in moves if m["word"].upper().startswith(letter)]
         remaining    = remaining_for_letter(letter, set(game.words_used))
 
-        embed = words_by_letter_embed(letter, letter_moves, remaining, game.game_id)
-        await ctx.followup.send(embed=embed)
+        view  = LetterWordsView(letter, letter_moves, remaining, game.game_id)
+        await ctx.followup.send(
+            embed=view.build_embed(),
+            view=view if view.total_pages > 1 else None,
+        )
 
     # ── /chain hint ───────────────────────────────────────────────────────────
     @chain.command(
@@ -245,6 +391,18 @@ class ChainCog(commands.Cog):
         embed  = hint_embed(game.next_letter, hints, rem, game.game_id, ctx.author.display_name)
         await ctx.followup.send(embed=embed)
 
+    # ── /chain top ────────────────────────────────────────────────────────────
+    @chain.command(name="top", description="Show the longest chain games ever played in this server")
+    async def top(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
+        if ctx.guild is None:
+            await ctx.followup.send("Use this command inside a server.")
+            return
+
+        rows  = await db.get_top_chains(str(ctx.guild.id))
+        embed = top_chains_embed(rows, ctx.guild.name)
+        await ctx.followup.send(embed=embed)
+
     # ── /chain end ────────────────────────────────────────────────────────────
     @chain.command(name="end", description="End the active chain game in this channel")
     async def end(self, ctx: discord.ApplicationContext):
@@ -253,7 +411,8 @@ class ChainCog(commands.Cog):
             await ctx.followup.send("Use this command inside a server.")
             return
 
-        row = await db.get_active_chain(str(ctx.guild.id), str(ctx.channel.id))
+        gid = str(ctx.guild.id)
+        row = await db.get_active_chain(gid, str(ctx.channel.id))
         if not row:
             await ctx.followup.send("No active chain game to end.")
             return
@@ -262,25 +421,29 @@ class ChainCog(commands.Cog):
         moves = await db.get_chain_moves(game.game_id)
         await db.update_chain_game(game.game_id, game.words_used, game.next_letter or "", "ended")
 
-        # Per-player summary for this game
+        # Update personal bests for all participants
+        seen: set[str] = set()
+        for m in moves:
+            if m["user_id"] not in seen:
+                seen.add(m["user_id"])
+                await db.update_longest_chain(m["user_id"], gid, game.chain_length)
+
+        # Per-player summary
         tally: dict[str, list[str]] = {}
         for m in moves:
             tally.setdefault(m["username"], []).append(m["word"])
 
-        lines = [
-            f"**{name}** — {len(words)} word(s): {', '.join(f'`{w}`' for w in words)}"
-            for name, words in sorted(tally.items(), key=lambda x: -len(x[1]))
-        ]
-
-        embed = discord.Embed(
-            title=f"🔗 Chain Ended — Game #{game.game_id}",
-            colour=CHAIN_COLOR,
-            description=(
-                f"Chain length: **{game.chain_length}** word(s)\n\n"
-                + ("\n".join(lines) if lines else "No moves were made.")
-            ),
-        )
+        embed = chain_end_embed(game.game_id, game.chain_length, tally)
         await ctx.followup.send(embed=embed)
+
+        # Full chain recap
+        if game.chain_length > 0:
+            recap_view = ChainRecapView(game.words_used, game.game_id)
+            await ctx.channel.send(
+                "📜 **Final Chain Recap:**",
+                embed=recap_view.build_embed(),
+                view=recap_view if recap_view.total_pages > 1 else None,
+            )
 
     # ── /chain help ───────────────────────────────────────────────────────────
     @chain.command(name="help", description="How to play Word Chain")
@@ -305,12 +468,17 @@ class ChainCog(commands.Cog):
                 "`last` *(default)* — next word starts with the **last** letter\n"
                 "`random` — a **random** letter from the word is chosen next\n"
                 "`2nd` / `3rd` / `4th` — specific position's letter is used\n\n"
+                "**Streak & Spotlight**\n"
+                "• 🔥 **Streak bonus** — play back-to-back words for **+1 extra pt** each time\n"
+                "• ✨ **Rare word spotlight** — ★★★ rare words get a special callout\n"
+                "• 🎉 **Milestone recap** — full chain shown every 100 words\n\n"
                 "**Commands**\n"
                 "`/chain start [mode]` — start a game\n"
                 "`/chain play <word>` — add a word\n"
                 "`/chain status` — view the current chain and remaining words\n"
-                "`/chain words <letter>` — see words used for a letter + how many are left\n"
+                "`/chain words <letter>` — see all words used for a letter (paginated)\n"
                 "`/chain hint` — ask for a hint (visible to all — use wisely!)\n"
+                "`/chain top` — server's longest chains ever\n"
                 "`/chain end` — end and show results\n"
                 "`/checkword <word>` — check if a word is in the dictionary\n"
             ),
