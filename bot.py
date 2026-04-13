@@ -150,8 +150,12 @@ async def on_ready():
     # Explicitly re-sync slash commands on every startup so redeploys never
     # leave stale or missing commands. py-cord's auto-sync on on_connect can
     # silently fail; this call in on_ready is the guaranteed safety net.
-    await bot.sync_commands()
-    print(f"    Commands synced ({'guild' if DEBUG_GUILDS else 'global'} mode)")
+    try:
+        await bot.sync_commands()
+        cmds = [c.name for c in bot.pending_application_commands]
+        print(f"    Commands synced ({'guild' if DEBUG_GUILDS else 'global'} mode): {cmds}")
+    except Exception as e:
+        print(f"    ❌ sync_commands() FAILED: {e}")
 
 
 @bot.event
