@@ -174,7 +174,11 @@ async def on_application_command_error(ctx: discord.ApplicationContext, error):
 # ── Cogs ───────────────────────────────────────────────────────────────────────
 
 for cog in COGS:
-    bot.load_extension(cog)
+    try:
+        bot.load_extension(cog)
+        print(f"    Loaded cog: {cog}")
+    except Exception as e:
+        print(f"    ❌ Failed to load cog {cog}: {e}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
