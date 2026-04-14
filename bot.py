@@ -1,4 +1,6 @@
 import os
+import sys
+import logging
 import certifi
 
 # Must be set before any SSL/network import (discord, aiohttp, etc.)
@@ -14,6 +16,14 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  [%(levelname)-8s]  %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("sigmoidian")
 
 TOKEN      = os.getenv("DISCORD_TOKEN", "")
 PORT       = int(os.getenv("PORT", "8080"))
@@ -133,29 +143,70 @@ async def _run_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"    Status page  →  http://localhost:{PORT}/")
-    print(f"    Health JSON  →  http://localhost:{PORT}/health")
+    log.info("Status page  →  http://localhost:%d/", PORT)
+    log.info("Health JSON  →  http://localhost:%d/health", PORT)
 
 
 # ── Bot events ─────────────────────────────────────────────────────────────────
 
+_ready_fired = False  # guard: only run full init once per process lifetime
+
 @bot.event
 async def on_ready():
+    global _ready_fired
+
+    log.info("Discord connected: %s (ID: %s) | guilds: %d",
+             bot.user, bot.user.id, len(bot.guilds))
+
+    if _ready_fired:
+        # Reconnection — skip heavy init but re-sync commands as a safety net.
+        log.info("Reconnected — re-syncing commands.")
+        try:
+            await bot.sync_commands()
+        except Exception as exc:
+            log.error("sync_commands() failed on reconnect: %s", exc)
+        return
+
+    _ready_fired = True
+
     from utils.database import init_db
     await init_db()
-    print(f"✅  Discord  : {bot.user} (ID: {bot.user.id})")
-    print(f"    Guilds  : {len(bot.guilds)}")
-    print("    DB      : initialised")
+    log.info("DB initialised.")
 
-    # Explicitly re-sync slash commands on every startup so redeploys never
-    # leave stale or missing commands. py-cord's auto-sync on on_connect can
-    # silently fail; this call in on_ready is the guaranteed safety net.
+    # ── Slash command sync ────────────────────────────────────────────────────
+    # py-cord auto-syncs on on_connect, but that can silently fail on a cold
+    # Railway start. This call in on_ready is the guaranteed safety net.
     try:
         await bot.sync_commands()
-        cmds = [c.name for c in bot.pending_application_commands]
-        print(f"    Commands synced ({'guild' if DEBUG_GUILDS else 'global'} mode): {cmds}")
-    except Exception as e:
-        print(f"    ❌ sync_commands() FAILED: {e}")
+        synced = [c.name for c in bot.pending_application_commands]
+        log.info(
+            "Commands synced (%s): %s",
+            f"guild {DEBUG_GUILDS[0]}" if DEBUG_GUILDS else "global",
+            synced if synced else "⚠ EMPTY — cog load may have failed silently",
+        )
+    except Exception as exc:
+        log.error("sync_commands() FAILED: %s", exc, exc_info=True)
+
+    # ── Stale guild-command cleanup ───────────────────────────────────────────
+    # When switching from guild-scoped → global, old guild-specific registrations
+    # persist on Discord and show up as ghost commands. Only wipe guilds that
+    # actually have stale registrations; log exactly what was cleared.
+    if not DEBUG_GUILDS:
+        cleaned = 0
+        for guild in bot.guilds:
+            try:
+                existing = await bot.http.get_guild_commands(bot.user.id, guild.id)
+                if existing:
+                    await bot.http.bulk_upsert_guild_commands(bot.user.id, guild.id, [])
+                    log.info("Cleared %d stale guild command(s) from %s (%d).",
+                             len(existing), guild.name, guild.id)
+                    cleaned += 1
+            except Exception as exc:
+                log.warning("Could not clear guild commands for %s: %s", guild.name, exc)
+        if cleaned:
+            log.info("Stale guild-command cleanup done — %d guild(s) cleared.", cleaned)
+        else:
+            log.info("No stale guild commands found.")
 
 
 @bot.event
@@ -176,9 +227,12 @@ async def on_application_command_error(ctx: discord.ApplicationContext, error):
 for cog in COGS:
     try:
         bot.load_extension(cog)
-        print(f"    Loaded cog: {cog}")
-    except Exception as e:
-        print(f"    ❌ Failed to load cog {cog}: {e}")
+        log.info("Loaded cog: %s", cog)
+    except Exception as exc:
+        # Abort immediately — if a cog fails to load, sync_commands() would push
+        # an empty or partial command list and wipe all slash commands from Discord.
+        log.critical("FAILED to load cog %s: %s — aborting startup.", cog, exc, exc_info=True)
+        sys.exit(1)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -189,8 +243,7 @@ async def main():
     token_set = bool(TOKEN) and TOKEN != "your_bot_token_here"
 
     if not token_set:
-        print("⚠️  DISCORD_TOKEN not set  →  running in local-only mode")
-        print(f"    Open http://localhost:{PORT}/ for setup instructions.")
+        log.warning("DISCORD_TOKEN not set — running in local-only mode. Open http://localhost:%d/", PORT)
         await asyncio.Event().wait()   # block until Ctrl-C
     else:
         await bot.start(TOKEN)
@@ -201,6 +254,6 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
-        print("\n👋  Stopped.")
+        log.info("Shutting down — goodbye!")
     finally:
         loop.close()
