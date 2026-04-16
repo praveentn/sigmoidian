@@ -187,6 +187,35 @@ async def on_ready():
     except Exception as exc:
         log.error("sync_commands() FAILED: %s", exc, exc_info=True)
 
+    # Verify what Discord's API actually has — py-cord's sync_commands() upserts
+    # but does NOT purge foreign/stale commands it doesn't recognise. If there's a
+    # mismatch, hard-wipe via bulk overwrite (PUT) then force a fresh sync.
+    try:
+        actual = await bot.http.get_global_commands(bot.user.id)
+        actual_names = sorted(c["name"] for c in actual)
+        expected_names = sorted(c.name for c in bot.pending_application_commands)
+
+        if actual_names == expected_names:
+            log.info("Discord API confirms global commands: %s", actual_names)
+        else:
+            log.warning(
+                "Mismatch — Discord has %d command(s) %s, expected %s. "
+                "Force-wiping and re-syncing.",
+                len(actual_names), actual_names, expected_names,
+            )
+            # Hard-wipe: PUT /applications/{id}/commands [] is a full replace.
+            await bot.http.bulk_upsert_global_commands(bot.user.id, [])
+            # Re-register only this bot's commands.
+            await bot.sync_commands(force=True)
+            # Final confirmation.
+            after = await bot.http.get_global_commands(bot.user.id)
+            log.info(
+                "Force-wipe complete. Discord now has: %s",
+                sorted(c["name"] for c in after),
+            )
+    except Exception as exc:
+        log.warning("Global command verification/cleanup failed: %s", exc)
+
     # ── Stale guild-command cleanup ───────────────────────────────────────────
     # When switching from guild-scoped → global, old guild-specific registrations
     # persist on Discord and show up as ghost commands. Only wipe guilds that
