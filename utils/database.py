@@ -39,6 +39,14 @@ async def _migrate(db) -> None:
         await db.commit()
         print("    DB migration : removed game_mode column from word_log")
 
+    # chain_games: add started_by column if missing
+    if gcols and "started_by" not in gcols:
+        await db.execute(
+            "ALTER TABLE chain_games ADD COLUMN started_by TEXT NOT NULL DEFAULT ''"
+        )
+        await db.commit()
+        print("    DB migration : added started_by column to chain_games")
+
     # user_stats: add longest_chain column if missing
     async with db.execute("PRAGMA table_info(user_stats)") as cur:
         ucols_lc = {row[1] for row in await cur.fetchall()}
@@ -85,6 +93,7 @@ async def init_db() -> None:
                 words_used  TEXT NOT NULL DEFAULT '[]',
                 next_letter TEXT,
                 game_mode   TEXT NOT NULL DEFAULT 'last',
+                started_by  TEXT NOT NULL DEFAULT '',
                 status      TEXT NOT NULL DEFAULT 'active',
                 created_at  TEXT DEFAULT (datetime('now'))
             );
@@ -115,6 +124,15 @@ async def init_db() -> None:
                 word      TEXT NOT NULL,
                 timestamp TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE INDEX IF NOT EXISTS idx_chain_games_lookup
+                ON chain_games(guild_id, channel_id, status);
+            CREATE INDEX IF NOT EXISTS idx_chain_moves_game
+                ON chain_moves(game_id);
+            CREATE INDEX IF NOT EXISTS idx_word_log_guild
+                ON word_log(guild_id);
+            CREATE INDEX IF NOT EXISTS idx_user_stats_lb
+                ON user_stats(guild_id, chain_points DESC);
         """)
         await db.commit()
 
@@ -133,11 +151,13 @@ async def get_active_chain(guild_id: str, channel_id: str) -> dict | None:
             return dict(row) if row else None
 
 
-async def create_chain_game(guild_id: str, channel_id: str, game_mode: str = "last") -> int:
+async def create_chain_game(
+    guild_id: str, channel_id: str, game_mode: str = "last", started_by: str = ""
+) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "INSERT INTO chain_games (guild_id, channel_id, game_mode) VALUES (?,?,?)",
-            (guild_id, channel_id, game_mode),
+            "INSERT INTO chain_games (guild_id, channel_id, game_mode, started_by) VALUES (?,?,?,?)",
+            (guild_id, channel_id, game_mode, started_by),
         ) as cur:
             game_id = cur.lastrowid
         await db.commit()

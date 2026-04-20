@@ -1,3 +1,4 @@
+import html as _html
 import os
 import sys
 import logging
@@ -100,7 +101,7 @@ async def _status_page(request):
     rows.append(f'<li>{"✅" if token_set  else "❌"} Token  : '
                 f'{"<span class=ok>configured</span>" if token_set else "<span class=err>not set — edit <code>.env</code></span>"}</li>')
     rows.append(f'<li>{"✅" if discord_ok else "⏳"} Discord: '
-                f'{"<span class=ok>connected as <b>" + str(bot.user) + "</b></span>" if discord_ok else "<span class=warn>not connected yet</span>"}</li>')
+                f'{"<span class=ok>connected as <b>" + _html.escape(str(bot.user)) + "</b></span>" if discord_ok else "<span class=warn>not connected yet</span>"}</li>')
     rows.append(f'<li>✅ HTTP server: <span class=ok>port {PORT}</span></li>')
     rows.append(f'<li>⏱ Uptime: {uptime}</li>')
 
@@ -108,7 +109,7 @@ async def _status_page(request):
 
     if discord_ok:
         content += (f'<div class=card><h2>Bot Info</h2><ul>'
-                    f'<li>🤖 {bot.user}</li>'
+                    f'<li>🤖 {_html.escape(str(bot.user))}</li>'
                     f'<li>🏠 Guilds: {len(bot.guilds)}</li>'
                     f'<li>📡 Latency: {round(bot.latency*1000)} ms</li>'
                     f'</ul></div>')
