@@ -307,7 +307,7 @@ class ReminderCog(commands.Cog):
             description=(
                 f"Reminders will fire in {channel.mention} at **6:00 AM {timezone}** every day.\n\n"
                 "Each reminder includes:\n"
-                "• 📖 An "On this day in word history" fact\n"
+                "• 📖 An 'On this day in word history' fact\n"
                 "• 🏆 Live leaderboard snapshot (top 3)\n"
                 "• 🎮 Active chain game status with channel link\n"
                 "• 👋 A tag to every player who has ever played\n\n"
