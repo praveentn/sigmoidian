@@ -129,12 +129,22 @@ async def migrate():
     async with sqlite.execute("SELECT * FROM chain_moves ORDER BY id") as cur:
         rows = await cur.fetchall()
     if rows:
+        def parse_ts(val):
+            if isinstance(val, str):
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                    try:
+                        return datetime.strptime(val, fmt)
+                    except Exception:
+                        continue
+                return None
+            return val
+
         await pg.executemany(
             """INSERT INTO chain_moves (id, game_id, user_id, username, word, timestamp)
                VALUES ($1,$2,$3,$4,$5,$6)
                ON CONFLICT (id) DO NOTHING""",
             [
-                (r["id"], r["game_id"], r["user_id"], r["username"], r["word"], r["timestamp"])
+                (r["id"], r["game_id"], r["user_id"], r["username"], r["word"], parse_ts(r["timestamp"]))
                 for r in rows
             ],
         )
@@ -172,7 +182,7 @@ async def migrate():
                VALUES ($1,$2,$3,$4,$5)
                ON CONFLICT (id) DO NOTHING""",
             [
-                (r["id"], r["guild_id"], r["user_id"], r["word"], r["timestamp"])
+                (r["id"], r["guild_id"], r["user_id"], r["word"], parse_ts(r["timestamp"]))
                 for r in rows
             ],
         )
