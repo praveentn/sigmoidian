@@ -287,4 +287,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log.info("Shutting down — goodbye!")
     finally:
+        from utils.database import close_pool
+        loop.run_until_complete(close_pool())
         loop.close()
