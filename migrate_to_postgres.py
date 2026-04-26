@@ -99,8 +99,10 @@ async def migrate():
                 (
                     r["id"], r["guild_id"], r["channel_id"],
                     r["words_used"] or "[]", r["next_letter"],
-                    r.get("game_mode", "last") or "last", r.get("started_by", "") or "",
-                    r.get("status", "active") or "active", r["created_at"],
+                    r["game_mode"] if "game_mode" in r and r["game_mode"] else "last",
+                    r["started_by"] if "started_by" in r and r["started_by"] else "",
+                    r["status"] if "status" in r and r["status"] else "active",
+                    r["created_at"],
                 )
                 for r in rows
             ],
