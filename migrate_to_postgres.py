@@ -13,6 +13,7 @@ import sys
 
 import aiosqlite
 import asyncpg
+from datetime import datetime
 
 
 SQLITE_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join("data", "wordle_bot.db")
@@ -90,6 +91,17 @@ async def migrate():
     async with sqlite.execute("SELECT * FROM chain_games ORDER BY id") as cur:
         rows = await cur.fetchall()
     if rows:
+        def parse_created_at(val):
+            if isinstance(val, str):
+                # Try parsing common SQLite datetime formats
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                    try:
+                        return datetime.strptime(val, fmt)
+                    except Exception:
+                        continue
+                return None
+            return val
+
         await pg.executemany(
             """INSERT INTO chain_games (id, guild_id, channel_id, words_used, next_letter,
                                         game_mode, started_by, status, created_at)
@@ -102,7 +114,7 @@ async def migrate():
                     r["game_mode"] if "game_mode" in r and r["game_mode"] else "last",
                     r["started_by"] if "started_by" in r and r["started_by"] else "",
                     r["status"] if "status" in r and r["status"] else "active",
-                    r["created_at"],
+                    parse_created_at(r["created_at"]),
                 )
                 for r in rows
             ],
