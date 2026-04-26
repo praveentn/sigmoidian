@@ -200,8 +200,11 @@ class ReminderCog(commands.Cog):
 
             channel = self.bot.get_channel(int(channel_id))
             if channel is None:
-                log.warning("Reminder: channel %s not in cache for guild %s", channel_id, guild_id)
-                continue
+                try:
+                    channel = await self.bot.fetch_channel(int(channel_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    log.warning("Reminder: cannot access channel %s for guild %s", channel_id, guild_id)
+                    continue
 
             await self._send_reminder(channel.guild, channel, now_local)
 
@@ -378,12 +381,15 @@ class ReminderCog(commands.Cog):
 
         channel = self.bot.get_channel(int(cfg["reminder_channel_id"]))
         if channel is None:
-            await ctx.followup.send(
-                "❌ The configured reminder channel is no longer accessible.\n"
-                "Use `/remind channel #channel` to set a new one.",
-                ephemeral=True,
-            )
-            return
+            try:
+                channel = await self.bot.fetch_channel(int(cfg["reminder_channel_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await ctx.followup.send(
+                    "❌ The configured reminder channel is no longer accessible.\n"
+                    "Use `/remind channel #channel` to set a new one.",
+                    ephemeral=True,
+                )
+                return
 
         tz_name = cfg.get("timezone") or "UTC"
         try:
