@@ -125,6 +125,13 @@ async def init_db() -> None:
                 timestamp TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id            TEXT PRIMARY KEY,
+                reminder_channel_id TEXT,
+                timezone            TEXT NOT NULL DEFAULT 'UTC',
+                last_reminder_date  TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_chain_games_lookup
                 ON chain_games(guild_id, channel_id, status);
             CREATE INDEX IF NOT EXISTS idx_chain_moves_game
@@ -293,5 +300,83 @@ async def get_top_words(guild_id: str, limit: int = 15) -> list[dict]:
             "SELECT word, COUNT(*) as count FROM word_log WHERE guild_id=? "
             "GROUP BY word ORDER BY count DESC LIMIT ?",
             (guild_id, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Guild settings / reminders ─────────────────────────────────────────────────
+
+async def get_guild_settings(guild_id: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_settings WHERE guild_id=?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def set_guild_reminder(guild_id: str, channel_id: str, tz: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO guild_settings (guild_id, reminder_channel_id, timezone)
+               VALUES (?,?,?)
+               ON CONFLICT(guild_id) DO UPDATE SET
+                   reminder_channel_id=excluded.reminder_channel_id,
+                   timezone=excluded.timezone""",
+            (guild_id, channel_id, tz),
+        )
+        await db.commit()
+
+
+async def disable_guild_reminder(guild_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE guild_settings SET reminder_channel_id=NULL WHERE guild_id=?",
+            (guild_id,),
+        )
+        await db.commit()
+
+
+async def update_last_reminder_date(guild_id: str, date_str: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO guild_settings (guild_id, last_reminder_date)
+               VALUES (?,?)
+               ON CONFLICT(guild_id) DO UPDATE SET last_reminder_date=excluded.last_reminder_date""",
+            (guild_id, date_str),
+        )
+        await db.commit()
+
+
+async def get_all_reminder_guilds() -> list[dict]:
+    """Return all guilds that have an active reminder channel configured."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_settings WHERE reminder_channel_id IS NOT NULL"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_active_players(guild_id: str) -> list[dict]:
+    """Return all users who have played at least one word in this guild, ranked by points."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT user_id, username, chain_words, chain_points FROM user_stats "
+            "WHERE guild_id=? AND chain_words > 0 ORDER BY chain_points DESC",
+            (guild_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_active_chains_for_guild(guild_id: str) -> list[dict]:
+    """Return all currently active chain games in a guild."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM chain_games WHERE guild_id=? AND status='active' ORDER BY id DESC",
+            (guild_id,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]

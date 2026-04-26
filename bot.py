@@ -46,6 +46,7 @@ bot     = discord.Bot(intents=intents, debug_guilds=DEBUG_GUILDS)
 COGS = [
     "cogs.chain_cog",
     "cogs.stats_cog",
+    "cogs.reminder_cog",
 ]
 
 # ── Status dashboard ───────────────────────────────────────────────────────────
