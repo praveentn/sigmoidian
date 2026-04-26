@@ -379,14 +379,17 @@ class ReminderCog(commands.Cog):
             )
             return
 
-        channel = self.bot.get_channel(int(cfg["reminder_channel_id"]))
+        raw_id  = cfg["reminder_channel_id"]
+        channel = ctx.guild.get_channel(int(raw_id))
         if channel is None:
             try:
-                channel = await self.bot.fetch_channel(int(cfg["reminder_channel_id"]))
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = await ctx.guild.fetch_channel(int(raw_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
                 await ctx.followup.send(
-                    "❌ The configured reminder channel is no longer accessible.\n"
-                    "Use `/remind channel #channel` to set a new one.",
+                    f"❌ Could not access reminder channel (ID `{raw_id}`).\n"
+                    f"Error: `{exc}`\n\n"
+                    "Make sure the bot has **View Channel** permission there, or "
+                    "use `/remind channel #channel` to set a new one.",
                     ephemeral=True,
                 )
                 return
