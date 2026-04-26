@@ -25,9 +25,9 @@ if not PG_URL:
 
 
 async def migrate():
-        async def table_exists(db, table_name):
-            async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)) as cur:
-                return await cur.fetchone() is not None
+    async def table_exists(db, table_name):
+        async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)) as cur:
+            return await cur.fetchone() is not None
     print(f"Opening SQLite DB: {SQLITE_PATH}")
     sqlite = await aiosqlite.connect(SQLITE_PATH)
     sqlite.row_factory = aiosqlite.Row
