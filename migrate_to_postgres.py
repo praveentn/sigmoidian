@@ -25,6 +25,9 @@ if not PG_URL:
 
 
 async def migrate():
+        async def table_exists(db, table_name):
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)) as cur:
+                return await cur.fetchone() is not None
     print(f"Opening SQLite DB: {SQLITE_PATH}")
     sqlite = await aiosqlite.connect(SQLITE_PATH)
     sqlite.row_factory = aiosqlite.Row
@@ -88,8 +91,12 @@ async def migrate():
 
     # ── 2. Migrate chain_games ─────────────────────────────────────────────────
     print("Migrating chain_games...")
-    async with sqlite.execute("SELECT * FROM chain_games ORDER BY id") as cur:
-        rows = await cur.fetchall()
+    if await table_exists(sqlite, "chain_games"):
+        async with sqlite.execute("SELECT * FROM chain_games ORDER BY id") as cur:
+            rows = await cur.fetchall()
+    else:
+        print("  ! Table 'chain_games' does not exist, skipping.")
+        rows = []
     if rows:
         def parse_created_at(val):
             if isinstance(val, str):
@@ -126,8 +133,12 @@ async def migrate():
 
     # ── 3. Migrate chain_moves ─────────────────────────────────────────────────
     print("Migrating chain_moves...")
-    async with sqlite.execute("SELECT * FROM chain_moves ORDER BY id") as cur:
-        rows = await cur.fetchall()
+    if await table_exists(sqlite, "chain_moves"):
+        async with sqlite.execute("SELECT * FROM chain_moves ORDER BY id") as cur:
+            rows = await cur.fetchall()
+    else:
+        print("  ! Table 'chain_moves' does not exist, skipping.")
+        rows = []
     if rows:
         def parse_ts(val):
             if isinstance(val, str):
@@ -154,8 +165,12 @@ async def migrate():
 
     # ── 4. Migrate user_stats ──────────────────────────────────────────────────
     print("Migrating user_stats...")
-    async with sqlite.execute("SELECT * FROM user_stats") as cur:
-        rows = await cur.fetchall()
+    if await table_exists(sqlite, "user_stats"):
+        async with sqlite.execute("SELECT * FROM user_stats") as cur:
+            rows = await cur.fetchall()
+    else:
+        print("  ! Table 'user_stats' does not exist, skipping.")
+        rows = []
     if rows:
         await pg.executemany(
             """INSERT INTO user_stats (user_id, guild_id, username, chain_points, chain_words, longest_chain)
@@ -174,8 +189,12 @@ async def migrate():
 
     # ── 5. Migrate word_log ────────────────────────────────────────────────────
     print("Migrating word_log...")
-    async with sqlite.execute("SELECT * FROM word_log ORDER BY id") as cur:
-        rows = await cur.fetchall()
+    if await table_exists(sqlite, "word_log"):
+        async with sqlite.execute("SELECT * FROM word_log ORDER BY id") as cur:
+            rows = await cur.fetchall()
+    else:
+        print("  ! Table 'word_log' does not exist, skipping.")
+        rows = []
     if rows:
         await pg.executemany(
             """INSERT INTO word_log (id, guild_id, user_id, word, timestamp)
@@ -192,8 +211,12 @@ async def migrate():
 
     # ── 6. Migrate guild_settings ──────────────────────────────────────────────
     print("Migrating guild_settings...")
-    async with sqlite.execute("SELECT * FROM guild_settings") as cur:
-        rows = await cur.fetchall()
+    if await table_exists(sqlite, "guild_settings"):
+        async with sqlite.execute("SELECT * FROM guild_settings") as cur:
+            rows = await cur.fetchall()
+    else:
+        print("  ! Table 'guild_settings' does not exist, skipping.")
+        rows = []
     if rows:
         await pg.executemany(
             """INSERT INTO guild_settings (guild_id, reminder_channel_id, timezone, last_reminder_date)
