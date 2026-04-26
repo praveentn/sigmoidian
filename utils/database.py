@@ -277,6 +277,30 @@ async def set_guild_reminder(guild_id: str, channel_id: str, tz: str) -> None:
         )
 
 
+async def set_reminder_channel(guild_id: str, channel_id: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO guild_settings (guild_id, reminder_channel_id)
+               VALUES ($1,$2)
+               ON CONFLICT(guild_id) DO UPDATE SET
+                   reminder_channel_id=EXCLUDED.reminder_channel_id""",
+            guild_id, channel_id,
+        )
+
+
+async def set_reminder_timezone(guild_id: str, tz: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO guild_settings (guild_id, timezone)
+               VALUES ($1,$2)
+               ON CONFLICT(guild_id) DO UPDATE SET
+                   timezone=EXCLUDED.timezone""",
+            guild_id, tz,
+        )
+
+
 async def disable_guild_reminder(guild_id: str) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
