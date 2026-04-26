@@ -256,6 +256,7 @@ class ChainCog(commands.Cog):
 
             total, base_pts, tier_label, stars = game.play(word)
 
+
             await db.update_chain_game(game.game_id, game.words_used, game.next_letter or "")
             await db.add_chain_move(game.game_id, uid, ctx.author.display_name, word)
             await db.upsert_user(uid, gid, ctx.author.display_name)
@@ -276,6 +277,11 @@ class ChainCog(commands.Cog):
             await db.increment_stat(uid, gid, "chain_points", total_final)
             await db.increment_stat(uid, gid, "chain_words")
             await db.log_word(gid, uid, word)
+
+            # ── Update longest_chain immediately if this is user's new best ──
+            user_stats = await db.get_user_stats(uid, gid)
+            if user_stats is not None and game.chain_length > (user_stats.get("longest_chain") or 0):
+                await db.update_longest_chain(uid, gid, game.chain_length)
 
             remaining = (
                 remaining_for_letter(game.next_letter, set(game.words_used))
