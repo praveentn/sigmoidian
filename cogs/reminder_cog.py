@@ -287,9 +287,6 @@ class ReminderCog(commands.Cog):
 
     def __init__(self, bot: discord.Bot):
         self.bot = bot
-        # Register the persistent view once so Discord routes button interactions
-        # to this handler even after a bot restart (no in-memory state needed).
-        bot.add_view(ReminderView())
         self._daily_task.start()
 
     def cog_unload(self):
@@ -307,6 +304,8 @@ class ReminderCog(commands.Cog):
     @_daily_task.before_loop
     async def _before_daily_task(self):
         await self.bot.wait_until_ready()
+        # Event loop is guaranteed running here — safe to instantiate View
+        self.bot.add_view(ReminderView())
 
     async def _check_and_send(self):
         guilds_cfg = await db.get_all_reminder_guilds()
