@@ -343,6 +343,49 @@ async def get_active_players(guild_id: str) -> list[dict]:
         return [_row_to_dict(r) for r in rows]
 
 
+async def get_all_time_players(guild_id: str) -> list[dict]:
+    """
+    Return every user who has ever played at least one word in this guild.
+
+    Uses a UNION of user_stats (primary source) and word_log (fallback) so that
+    players are never missed due to a stats-update race or partial write. The
+    result is deduplicated by user_id and ordered by points descending.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                u.user_id,
+                u.username,
+                u.chain_words,
+                u.chain_points
+            FROM user_stats u
+            WHERE u.guild_id = $1 AND u.chain_words > 0
+
+            UNION
+
+            SELECT
+                wl.user_id,
+                wl.user_id  AS username,   -- fallback: no display name in word_log
+                0           AS chain_words,
+                0           AS chain_points
+            FROM word_log wl
+            WHERE wl.guild_id = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_stats us
+                  WHERE us.user_id = wl.user_id
+                    AND us.guild_id = $1
+                    AND us.chain_words > 0
+              )
+
+            ORDER BY chain_points DESC
+            """,
+            guild_id,
+        )
+        return [_row_to_dict(r) for r in rows]
+
+
 async def get_active_chains_for_guild(guild_id: str) -> list[dict]:
     """Return all currently active chain games in a guild."""
     pool = await get_pool()

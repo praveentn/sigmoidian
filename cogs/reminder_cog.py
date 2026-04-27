@@ -7,6 +7,9 @@ fires every minute, checks whether it is 6:00–6:04 AM in the guild's timezone,
 and sends at most once per calendar day (guarded by last_reminder_date).
 
 Reminders are NEVER sent unless a channel has been explicitly configured.
+
+ReminderView uses persistent custom_ids and is registered with bot.add_view() so
+buttons remain functional across bot restarts — no in-memory state is required.
 """
 import asyncio
 import json
@@ -21,18 +24,15 @@ from discord import SlashCommandGroup
 
 from utils import database as db
 from utils.wordhistory import get_word_fact
-from utils.display import STATS_COLOR
+from utils.display import STATS_COLOR, CHAIN_COLOR
 
 log = logging.getLogger("sigmoidian.reminder")
 
 _REMINDER_HOUR   = 6   # fire at 6 AM local time
 _REMINDER_WINDOW = 5   # accept minutes 0–4 to survive brief restarts
 
-# Warm sunrise gold — distinct from the blue game embeds
 _SUNRISE_COLOR = discord.Colour.from_rgb(255, 179, 0)
-
-# Max content chars per Discord message (safety margin below 2000)
-_MENTION_CHUNK_LIMIT = 1800
+_MENTION_CHUNK_LIMIT = 1800  # safety margin below 2000-char Discord limit
 
 _HOOKS = [
     "The chain won't build itself — time to link up.",
@@ -125,7 +125,7 @@ def _build_reminder_embed(
     else:
         status_val = (
             "No game running yet — be the one to start it!\n"
-            "Use `/chain start` to kick off today's challenge."
+            "Use the **Start a Game** button below or `/chain start`."
         )
 
     embed.add_field(name="🎮 Chain Status", value=status_val, inline=False)
@@ -136,6 +136,144 @@ def _build_reminder_embed(
     )
     embed.set_footer(text=f"Sigmoidian Daily Reminder · {player_note}")
     return embed
+
+
+# ── Persistent interactive view ────────────────────────────────────────────────
+
+class ReminderView(discord.ui.View):
+    """
+    Buttons attached to every daily reminder message.
+
+    Uses stable custom_ids + bot.add_view() registration so interactions are
+    handled correctly even after a bot restart — no in-memory state required.
+    All callbacks run on the bot's asyncio event loop; no threading concerns.
+    """
+
+    def __init__(self):
+        super().__init__(timeout=None)  # persistent — never expires
+
+    @discord.ui.button(
+        label="🔗 Start a Game",
+        style=discord.ButtonStyle.success,
+        custom_id="reminder:start_game",
+    )
+    async def start_game(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild:
+            await interaction.followup.send("Only works inside a server.", ephemeral=True)
+            return
+
+        gid = str(interaction.guild_id)
+        cid = str(interaction.channel_id)
+
+        existing = await db.get_active_chain(gid, cid)
+        if existing:
+            await interaction.followup.send(
+                f"A game is already running here (Game #{existing['id']})!\n"
+                "Use `/chain play <word>` to jump in.",
+                ephemeral=True,
+            )
+            return
+
+        game_id = await db.create_chain_game(
+            gid, cid, "last", started_by=str(interaction.user.id)
+        )
+        await db.upsert_user(str(interaction.user.id), gid, interaction.user.display_name)
+
+        embed = discord.Embed(
+            title=f"🔗 Word Chain Started — Game #{game_id}",
+            colour=CHAIN_COLOR,
+            description=(
+                f"**{interaction.user.display_name}** kicked off today's game!\n\n"
+                "**How to play**\n"
+                "• `/chain play <word>` — add a 5-letter word to the chain\n"
+                "• Each word must start with the **last letter** of the previous word\n"
+                "  e.g. `SENSE` → `ENTER` → `ROVER` → `RANGE` → …\n"
+                "• Words must be in the dictionary · no repeats · anyone can join!\n\n"
+                "**Scoring**: ★☆☆ Common = +1pt · ★★☆ Moderate = +2pts · ★★★ Rare = +3pts\n"
+                "• **+2 milestone bonus** every 5 words in the chain"
+            ),
+        )
+        embed.set_footer(text=f"Game #{game_id} | Mode: last letter | /chain end to stop")
+
+        try:
+            await interaction.channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("ReminderView: cannot announce game in channel %s: %s", cid, exc)
+
+        await interaction.followup.send(
+            f"✅ Game #{game_id} started! Use `/chain play <word>` to jump in.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="🏆 Leaderboard",
+        style=discord.ButtonStyle.primary,
+        custom_id="reminder:leaderboard",
+    )
+    async def leaderboard(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild:
+            await interaction.followup.send("Only works inside a server.", ephemeral=True)
+            return
+
+        rows = await db.get_leaderboard(str(interaction.guild_id), limit=10)
+        if not rows:
+            await interaction.followup.send(
+                "No players on the leaderboard yet — start a game and be the first!",
+                ephemeral=True,
+            )
+            return
+
+        medals = ["🥇", "🥈", "🥉"]
+        lines  = []
+        for i, row in enumerate(rows):
+            prefix  = medals[i] if i < 3 else f"**{i + 1}.**"
+            name    = row.get("username") or f"<@{row['user_id']}>"
+            pts     = row.get("chain_points", 0)
+            words   = row.get("chain_words", 0)
+            longest = row.get("longest_chain", 0)
+            lines.append(
+                f"{prefix} **{name}** — {pts} pts · {words} words · best chain: {longest}"
+            )
+
+        embed = discord.Embed(
+            title=f"🏆 {interaction.guild.name} Leaderboard",
+            description="\n".join(lines),
+            colour=STATS_COLOR,
+        )
+        embed.set_footer(text="Use /stats for your full personal stats")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="📊 My Stats",
+        style=discord.ButtonStyle.secondary,
+        custom_id="reminder:my_stats",
+    )
+    async def my_stats(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild:
+            await interaction.followup.send("Only works inside a server.", ephemeral=True)
+            return
+
+        stats = await db.get_user_stats(
+            str(interaction.user.id), str(interaction.guild_id)
+        )
+        if not stats or stats.get("chain_words", 0) == 0:
+            await interaction.followup.send(
+                "You haven't played yet!\nClick **Start a Game** or use `/chain start` to begin.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"📊 {interaction.user.display_name}'s Stats",
+            colour=STATS_COLOR,
+        )
+        embed.add_field(name="Points",       value=str(stats.get("chain_points", 0)),  inline=True)
+        embed.add_field(name="Words Played", value=str(stats.get("chain_words", 0)),   inline=True)
+        embed.add_field(name="Best Chain",   value=str(stats.get("longest_chain", 0)), inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ── Cog ────────────────────────────────────────────────────────────────────────
@@ -149,6 +287,9 @@ class ReminderCog(commands.Cog):
 
     def __init__(self, bot: discord.Bot):
         self.bot = bot
+        # Register the persistent view once so Discord routes button interactions
+        # to this handler even after a bot restart (no in-memory state needed).
+        bot.add_view(ReminderView())
         self._daily_task.start()
 
     def cog_unload(self):
@@ -183,7 +324,10 @@ class ReminderCog(commands.Cog):
             try:
                 tz = ZoneInfo(tz_name)
             except ZoneInfoNotFoundError:
-                log.warning("Unknown timezone %r for guild %s — falling back to UTC", tz_name, guild_id)
+                log.warning(
+                    "Unknown timezone %r for guild %s — falling back to UTC",
+                    tz_name, guild_id,
+                )
                 tz = ZoneInfo("UTC")
 
             now_local = now_utc.astimezone(tz)
@@ -203,7 +347,10 @@ class ReminderCog(commands.Cog):
                 try:
                     channel = await self.bot.fetch_channel(int(channel_id))
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    log.warning("Reminder: cannot access channel %s for guild %s", channel_id, guild_id)
+                    log.warning(
+                        "Reminder: cannot access channel %s for guild %s",
+                        channel_id, guild_id,
+                    )
                     continue
 
             await self._send_reminder(channel.guild, channel, now_local)
@@ -218,10 +365,11 @@ class ReminderCog(commands.Cog):
     ) -> None:
         gid = str(guild.id)
 
+        # Fetch all data concurrently — safe: each coroutine is independent
         top_players, active_games, players = await asyncio.gather(
             db.get_leaderboard(gid, limit=3),
             db.get_active_chains_for_guild(gid),
-            db.get_active_players(gid),
+            db.get_all_time_players(gid),   # all users who ever played ≥ 1 word
         )
 
         today_display = f"{now_local.strftime('%B')} {now_local.day}"
@@ -238,26 +386,33 @@ class ReminderCog(commands.Cog):
             player_count  = len(players),
         )
 
-        user_ids       = [p["user_id"] for p in players]
+        # Deduplicate user_ids across both user_stats and word_log sources
+        user_ids       = list(dict.fromkeys(p["user_id"] for p in players))
         mention_chunks = _chunk_mentions(user_ids)
+
+        view = ReminderView()
 
         try:
             if mention_chunks:
-                # First chunk carries the embed — gives everyone context alongside the ping
-                await channel.send(content=mention_chunks[0], embed=embed)
-                # Additional pages of mentions (rare — only when server has many players)
+                # First chunk carries the embed and action buttons
+                await channel.send(content=mention_chunks[0], embed=embed, view=view)
+                # Overflow pages — rare, only when the server has many players
                 for i, chunk in enumerate(mention_chunks[1:], start=2):
                     await channel.send(
                         content=f"*(continued — page {i})* {chunk} — today's word chain awaits! 🔤"
                     )
             else:
-                # No players yet; embed-only with a soft CTA
+                # No players yet — send embed + buttons without any mentions
                 await channel.send(
-                    content="📣 Daily word challenge is live! Use `/chain start` to begin.",
+                    content="📣 Daily word challenge is live!",
                     embed=embed,
+                    view=view,
                 )
         except (discord.Forbidden, discord.HTTPException) as exc:
-            log.warning("Cannot send reminder to %s (#%s): %s", guild.name, getattr(channel, "id", "?"), exc)
+            log.warning(
+                "Cannot send reminder to %s (#%s): %s",
+                guild.name, getattr(channel, "id", "?"), exc,
+            )
             return
 
         log.info("Daily reminder sent → %s (#%s)", guild.name, getattr(channel, "id", "?"))
@@ -331,8 +486,8 @@ class ReminderCog(commands.Cog):
 
         await db.set_reminder_timezone(str(ctx.guild.id), timezone)
 
-        time_str = now_local.strftime("%I:%M %p")  # e.g. "02:34 PM"
-        date_str = now_local.strftime("%A, %B %d")  # e.g. "Saturday, April 26"
+        time_str = now_local.strftime("%I:%M %p")
+        date_str = now_local.strftime("%A, %B %d")
 
         embed = discord.Embed(
             title="✅ Timezone Set",
