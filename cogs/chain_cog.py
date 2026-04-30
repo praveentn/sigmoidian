@@ -508,6 +508,101 @@ class ChainCog(commands.Cog):
                 recap_view if recap_view.total_pages > 1 else None,
             )
 
+    # ── /chain remove ─────────────────────────────────────────────────────────
+
+    @chain.command(
+        name="remove",
+        description="Admin: force-end an active game or delete an ended game",
+        default_member_permissions=discord.Permissions(manage_guild=True),
+    )
+    async def remove(
+        self,
+        ctx: discord.ApplicationContext,
+        game_id: discord.Option(  # type: ignore[valid-type]
+            int,
+            "Game ID to target (leave blank to target the active game in this channel)",
+            required=False,
+        ) = None,
+    ):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this command inside a server.", ephemeral=True)
+            return
+
+        gid = str(ctx.guild.id)
+
+        if game_id is not None:
+            row = await db.get_chain_game_by_id(game_id)
+            if not row or row.get("guild_id") != gid:
+                await ctx.followup.send(
+                    f"❌ No game with ID **#{game_id}** found in this server.",
+                    ephemeral=True,
+                )
+                return
+        else:
+            row = await db.get_active_chain(gid, str(ctx.channel.id))
+            if not row:
+                await ctx.followup.send(
+                    "No active game in this channel.\n"
+                    "Use the `game_id` option to target a specific game by ID.",
+                    ephemeral=True,
+                )
+                return
+
+        g_id     = row["id"]
+        g_status = row.get("status", "active")
+        g_cid    = row.get("channel_id")
+
+        if g_status == "active":
+            # Force-end: mark as ended, update stats, post notice in the game channel
+            game  = ChainGame.from_db(row)
+            moves = await db.get_chain_moves(g_id)
+            await db.update_chain_game(g_id, game.words_used, game.next_letter or "", "ended")
+
+            seen: set[str] = set()
+            for m in moves:
+                if m["user_id"] not in seen:
+                    seen.add(m["user_id"])
+                    await db.update_longest_chain(m["user_id"], gid, game.chain_length)
+
+            notice = discord.Embed(
+                title=f"🛑 Game #{g_id} Force-Ended",
+                colour=ERROR_COLOR,
+                description=(
+                    f"This game was stopped by admin **{ctx.author.display_name}**.\n"
+                    f"Final chain length: **{game.chain_length}** word{'s' if game.chain_length != 1 else ''}."
+                ),
+            )
+            notice.set_footer(text="Use /chain start to begin a new game")
+
+            # Post in the game's own channel (skip if that's where the command ran)
+            target = ctx.guild.get_channel(int(g_cid)) if g_cid else None
+            if target and target.id != ctx.channel.id:
+                try:
+                    await target.send(embed=notice)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            elif not target or target.id == ctx.channel.id:
+                # Same channel — send it publicly so players see it
+                try:
+                    await ctx.channel.send(embed=notice)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            await ctx.followup.send(
+                f"✅ Game **#{g_id}** force-ended. "
+                f"Chain was **{game.chain_length}** word{'s' if game.chain_length != 1 else ''} long.",
+                ephemeral=True,
+            )
+
+        else:
+            # Already ended/inactive — hard-delete all traces
+            await db.delete_chain_game(g_id)
+            await ctx.followup.send(
+                f"🗑️ Game **#{g_id}** (was: `{g_status}`) has been permanently deleted.",
+                ephemeral=True,
+            )
+
     # ── /chain help ───────────────────────────────────────────────────────────
     @chain.command(name="help", description="How to play Word Chain")
     async def help(self, ctx: discord.ApplicationContext):
@@ -543,6 +638,7 @@ class ChainCog(commands.Cog):
                 "`/chain hint` — ask for a hint (visible to all — use wisely!)\n"
                 "`/chain top` — server's longest chains ever\n"
                 "`/chain end` — end and show results\n"
+                "`/chain remove [game_id]` — *(admin)* force-end active game or delete ended game\n"
                 "`/checkword <word>` — check if a word is in the dictionary\n"
             ),
         )

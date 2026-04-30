@@ -395,3 +395,20 @@ async def get_active_chains_for_guild(guild_id: str) -> list[dict]:
             guild_id,
         )
         return [_row_to_dict(r) for r in rows]
+
+
+async def get_chain_game_by_id(game_id: int) -> dict | None:
+    """Fetch any chain game by its ID regardless of status."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM chain_games WHERE id=$1", game_id)
+        return _row_to_dict(row) if row else None
+
+
+async def delete_chain_game(game_id: int) -> None:
+    """Hard-delete a game and all its moves from the database."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM chain_moves WHERE game_id=$1", game_id)
+            await conn.execute("DELETE FROM chain_games WHERE id=$1", game_id)
