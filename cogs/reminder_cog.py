@@ -111,21 +111,29 @@ def _build_reminder_embed(
         words_used  = json.loads(g.get("words_used") or "[]")
         chain_len   = len(words_used)
         next_letter = (g.get("next_letter") or "?").upper()
+        last_word   = words_used[-1].upper() if words_used else "—"
         if len(active_games) == 1:
             status_val = (
                 f"🔗 **Game #{g['id']}** is live in {channel_ref}!\n"
-                f"Chain length: **{chain_len}** · next letter: **{next_letter}**\n"
-                f"Use `/chain play <word>` to jump in."
+                f"Chain length: **{chain_len}** · last word: **{last_word}** · next letter: **{next_letter}**\n"
+                f"Use `/chain play <word>` to jump in, or tap **📋 Chain Status** below."
             )
         else:
+            lines = []
+            for ag in active_games[:3]:
+                wu  = json.loads(ag.get("words_used") or "[]")
+                nl  = (ag.get("next_letter") or "?").upper()
+                lw  = wu[-1].upper() if wu else "—"
+                lines.append(f"• <#{ag['channel_id']}> — length **{len(wu)}** · next **{nl}** (last: {lw})")
             status_val = (
                 f"🔗 **{len(active_games)} games** are running right now!\n"
-                f"Use `/chain play <word>` in any game channel to join."
+                + "\n".join(lines)
+                + "\nUse `/chain play <word>` in any game channel to join."
             )
     else:
         status_val = (
-            "No game running yet — be the one to start it!\n"
-            "Use the **Start a Game** button below or `/chain start`."
+            "No game running yet.\n"
+            "Server admins can use the **🔗 Start a Game** button below or `/chain start`."
         )
 
     embed.add_field(name="🎮 Chain Status", value=status_val, inline=False)
@@ -161,6 +169,14 @@ class ReminderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         if not interaction.guild:
             await interaction.followup.send("Only works inside a server.", ephemeral=True)
+            return
+
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.followup.send(
+                "⚠️ Only server admins can start a new game from the daily reminder.\n"
+                "Ask a server admin to tap this button, or wait for them to kick off today's chain!",
+                ephemeral=True,
+            )
             return
 
         gid = str(interaction.guild_id)
@@ -246,6 +262,46 @@ class ReminderView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(
+        label="📋 Chain Status",
+        style=discord.ButtonStyle.secondary,
+        custom_id="reminder:chain_status",
+    )
+    async def chain_status_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild:
+            await interaction.followup.send("Only works inside a server.", ephemeral=True)
+            return
+
+        active = await db.get_active_chains_for_guild(str(interaction.guild_id))
+        if not active:
+            await interaction.followup.send(
+                "No active chain games right now.\n"
+                "A server admin can start one with the **🔗 Start a Game** button!",
+                ephemeral=True,
+            )
+            return
+
+        lines = []
+        for g in active:
+            words_used  = json.loads(g.get("words_used") or "[]")
+            chain_len   = len(words_used)
+            next_letter = (g.get("next_letter") or "?").upper()
+            last_word   = words_used[-1].upper() if words_used else "—"
+            lines.append(
+                f"**Game #{g['id']}** — <#{g['channel_id']}>\n"
+                f"Length: **{chain_len}** · Last word: **{last_word}** · Next: **{next_letter}**\n"
+                f"Use `/chain play <word>` in that channel to join!"
+            )
+
+        embed = discord.Embed(
+            title="🎮 Active Chain Games",
+            description="\n\n".join(lines),
+            colour=CHAIN_COLOR,
+        )
+        embed.set_footer(text="Use /chain status in a game channel for the full chain view")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
         label="📊 My Stats",
         style=discord.ButtonStyle.secondary,
         custom_id="reminder:my_stats",
@@ -261,7 +317,8 @@ class ReminderView(discord.ui.View):
         )
         if not stats or stats.get("chain_words", 0) == 0:
             await interaction.followup.send(
-                "You haven't played yet!\nClick **Start a Game** or use `/chain start` to begin.",
+                "You haven't played yet! Jump into an active game with `/chain play <word>`, "
+                "or ask a server admin to start one.",
                 ephemeral=True,
             )
             return
@@ -415,6 +472,58 @@ class ReminderCog(commands.Cog):
             return
 
         log.info("Daily reminder sent → %s (#%s)", guild.name, getattr(channel, "id", "?"))
+
+        # Push status into each active game channel so normal users see it
+        if active_games:
+            await self._send_game_channel_reminders(guild, active_games, now_local)
+
+    # ── Game-channel status push ───────────────────────────────────────────────
+
+    async def _send_game_channel_reminders(
+        self,
+        guild: discord.Guild,
+        active_games: list[dict],
+        now_local: datetime,
+    ) -> None:
+        """
+        Send a lightweight status embed into each active game channel.
+
+        This ensures players in those channels (who may never see the admin
+        reminder channel) get a daily nudge and can see chain progress.
+        """
+        date_str = now_local.strftime("%B %d")
+        for g in active_games:
+            cid = g["channel_id"]
+            channel = guild.get_channel(int(cid))
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(int(cid))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+
+            words_used  = json.loads(g.get("words_used") or "[]")
+            chain_len   = len(words_used)
+            next_letter = (g.get("next_letter") or "?").upper()
+            last_word   = words_used[-1].upper() if words_used else "—"
+
+            embed = discord.Embed(
+                title=f"🌅 Good Morning! — {date_str}",
+                colour=_SUNRISE_COLOR,
+                description=(
+                    f"🔗 **Game #{g['id']}** is live here!\n\n"
+                    f"Chain length: **{chain_len}** · Last word: **{last_word}** · Next letter: **{next_letter}**\n\n"
+                    "Use `/chain play <word>` to keep the chain going today!"
+                ),
+            )
+            embed.set_footer(text="Sigmoidian Daily Reminder · /chain status for the full view")
+
+            try:
+                await channel.send(embed=embed)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                log.warning(
+                    "Cannot send game-channel reminder to %s (#%s): %s",
+                    guild.name, cid, exc,
+                )
 
     # ── /remind channel ────────────────────────────────────────────────────────
 
