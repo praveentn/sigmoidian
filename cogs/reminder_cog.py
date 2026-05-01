@@ -25,7 +25,7 @@ from discord import SlashCommandGroup
 from utils import database as db
 from utils.wordhistory import get_word_fact
 from utils.display import STATS_COLOR, CHAIN_COLOR
-from cogs.chain_cog import _active_game_channels as _chain_channels
+from cogs.chain_cog import _active_game_channels as _chain_channels, GameView as _GameView
 
 log = logging.getLogger("sigmoidian.reminder")
 
@@ -212,10 +212,10 @@ class ReminderView(discord.ui.View):
                 "• **+2 milestone bonus** every 5 words in the chain"
             ),
         )
-        embed.set_footer(text=f"Game #{game_id} | Mode: last letter | /chain end to stop")
+        embed.set_footer(text=f"Game #{game_id} | Mode: last letter | tap 🔚 End Game to stop")
 
         try:
-            await interaction.channel.send(embed=embed)
+            await interaction.channel.send(embed=embed, view=_GameView())
         except (discord.Forbidden, discord.HTTPException) as exc:
             log.warning("ReminderView: cannot announce game in channel %s: %s", cid, exc)
 
@@ -616,10 +616,10 @@ class ReminderCog(commands.Cog):
                     "Just type a 5-letter word here to keep the chain going today!"
                 ),
             )
-            embed.set_footer(text="Sigmoidian Daily Reminder · /chain status for the full view")
+            embed.set_footer(text="Sigmoidian Daily Reminder · tap 📊 Status for the full chain view")
 
             try:
-                await channel.send(embed=embed)
+                await channel.send(embed=embed, view=_GameView())
             except (discord.Forbidden, discord.HTTPException) as exc:
                 log.warning(
                     "Cannot send game-channel reminder to %s (#%s): %s",
