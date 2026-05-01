@@ -41,6 +41,7 @@ DEBUG_GUILDS = [int(_raw_guild)] if _raw_guild.isdigit() else None
 asyncio.set_event_loop(asyncio.new_event_loop())
 
 intents = discord.Intents.default()
+intents.message_content = True   # required to read message.content in on_message
 bot     = discord.Bot(intents=intents, debug_guilds=DEBUG_GUILDS)
 
 COGS = [
