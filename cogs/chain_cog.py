@@ -232,11 +232,11 @@ class GameView(discord.ui.View):
             await interaction.followup.send("No players yet — start playing!", ephemeral=True)
             return
         medals = ["🥇", "🥈", "🥉"]
-        lines  = [
-            f"{medals[i] if i < 3 else f'**{i+1}.**'} **{r.get('username') or f'<@{r[\"user_id\"]}>'}**"
-            f" — {r.get('chain_points', 0)} pts · {r.get('chain_words', 0)} words"
-            for i, r in enumerate(rows)
-        ]
+        lines  = []
+        for i, r in enumerate(rows):
+            prefix = medals[i] if i < 3 else f"**{i + 1}.**"
+            name   = r.get("username") or f"<@{r['user_id']}>"
+            lines.append(f"{prefix} **{name}** — {r.get('chain_points', 0)} pts · {r.get('chain_words', 0)} words")
         embed = discord.Embed(
             title=f"🏆 {interaction.guild.name} Leaderboard",
             description="\n".join(lines),
