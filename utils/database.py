@@ -76,6 +76,21 @@ async def init_db() -> None:
                 timezone            TEXT NOT NULL DEFAULT 'UTC',
                 last_reminder_date  TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS word_definitions (
+                word     TEXT PRIMARY KEY,
+                pos      TEXT NOT NULL DEFAULT '',
+                meaning  TEXT NOT NULL DEFAULT '',
+                example  TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_spotlight (
+                guild_id        TEXT PRIMARY KEY,
+                spotlight_date  TEXT,
+                user_id         TEXT,
+                channel_id      TEXT,
+                claimed         BOOLEAN DEFAULT FALSE
+            );
         """)
 
         # Create indexes (IF NOT EXISTS supported in PG 9.5+)
@@ -395,6 +410,73 @@ async def get_active_chains_for_guild(guild_id: str) -> list[dict]:
             guild_id,
         )
         return [_row_to_dict(r) for r in rows]
+
+
+async def get_all_active_game_channels() -> set[tuple[str, str]]:
+    """Return set of (guild_id, channel_id) for all currently active games."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT guild_id, channel_id FROM chain_games WHERE status='active'"
+        )
+        return {(r["guild_id"], r["channel_id"]) for r in rows}
+
+
+async def get_word_definition(word: str) -> dict | None:
+    """Return cached definition for a word, or None if not yet cached."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM word_definitions WHERE word=$1", word.upper()
+        )
+        return _row_to_dict(row) if row else None
+
+
+async def save_word_definition(word: str, pos: str, meaning: str, example: str) -> None:
+    """Cache a word's definition; no-op if already cached."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO word_definitions (word, pos, meaning, example)
+               VALUES ($1,$2,$3,$4)
+               ON CONFLICT(word) DO NOTHING""",
+            word.upper(), pos, meaning, example,
+        )
+
+
+async def get_spotlight(guild_id: str) -> dict | None:
+    """Return today's spotlight record for the guild, or None."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM daily_spotlight WHERE guild_id=$1", guild_id
+        )
+        return _row_to_dict(row) if row else None
+
+
+async def set_spotlight(guild_id: str, date_str: str, user_id: str, channel_id: str) -> None:
+    """Record today's spotlight player for a guild."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO daily_spotlight (guild_id, spotlight_date, user_id, channel_id, claimed)
+               VALUES ($1,$2,$3,$4,FALSE)
+               ON CONFLICT(guild_id) DO UPDATE SET
+                   spotlight_date=EXCLUDED.spotlight_date,
+                   user_id=EXCLUDED.user_id,
+                   channel_id=EXCLUDED.channel_id,
+                   claimed=FALSE""",
+            guild_id, date_str, user_id, channel_id,
+        )
+
+
+async def claim_spotlight(guild_id: str) -> None:
+    """Mark the spotlight as claimed (bonus points awarded)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE daily_spotlight SET claimed=TRUE WHERE guild_id=$1", guild_id
+        )
 
 
 async def get_chain_game_by_id(game_id: int) -> dict | None:

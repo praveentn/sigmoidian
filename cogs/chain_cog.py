@@ -2,18 +2,21 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
 from discord import SlashCommandGroup
 
 from utils import database as db
+from utils import definitions as worddef
 from utils.display import (
     chain_status_embed, hint_embed, chain_end_embed,
     chain_recap_embed, top_chains_embed, _remaining_indicator,
     ERROR_COLOR, CHAIN_COLOR, OK_COLOR,
 )
-from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter, get_hints
+from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter, get_hints, closest_word
 from game.chain import ChainGame, VALID_MODES
 
 log = logging.getLogger("sigmoidian.chain")
@@ -26,6 +29,10 @@ _channel_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 # Per-user cooldown: prevents rapid-fire spam of /chain play
 _user_last_play: dict[str, float] = {}
 _PLAY_COOLDOWN = 1.5  # seconds
+
+# Channels that currently have an active game — avoids a DB query per message.
+# Populated on ready, updated when games start and end.
+_active_game_channels: set[tuple[str, str]] = set()
 
 
 async def _try_channel_send(
@@ -153,6 +160,241 @@ _MODE_LABELS = {
 class ChainCog(commands.Cog):
     chain = SlashCommandGroup("chain", "Word-chain multiplayer game commands")
 
+    # ── Startup cache population ───────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        channels = await db.get_all_active_game_channels()
+        _active_game_channels.clear()
+        _active_game_channels.update(channels)
+        log.info("Active game channel cache populated: %d channel(s)", len(channels))
+
+    # ── Core play logic (shared by /chain play and on_message) ─────────────────
+
+    async def _process_play(
+        self,
+        gid: str,
+        cid: str,
+        uid: str,
+        username: str,
+        word: str,
+        ctx_or_msg,   # ApplicationContext OR discord.Message
+    ) -> None:
+        """
+        Validates and applies a word play. Handles all response sending.
+        Works for both slash-command and direct-message contexts.
+        """
+        is_slash = isinstance(ctx_or_msg, discord.ApplicationContext)
+        channel  = ctx_or_msg.channel
+
+        async def send(embed=None, content=None, ephemeral=False):
+            if is_slash:
+                await ctx_or_msg.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+            else:
+                if ephemeral:
+                    try:
+                        await ctx_or_msg.add_reaction("⏳")
+                    except discord.HTTPException:
+                        pass
+                else:
+                    await ctx_or_msg.reply(content=content, embed=embed)
+
+        # ── Rate limit ────────────────────────────────────────────────────────
+        rk   = f"{uid}:{gid}"
+        now  = time.monotonic()
+        wait = _PLAY_COOLDOWN - (now - _user_last_play.get(rk, 0))
+        if wait > 0:
+            await send(content=f"⏳ Wait **{wait:.1f}s** before playing again.", ephemeral=True)
+            return
+        _user_last_play[rk] = now
+
+        # ── Serialise concurrent plays per channel ────────────────────────────
+        async with _channel_locks[(gid, cid)]:
+            row = await db.get_active_chain(gid, cid)
+            if not row:
+                _active_game_channels.discard((gid, cid))
+                if is_slash:
+                    await send(content="No active chain game here. Use `/chain start` to begin.")
+                return
+
+            game  = ChainGame.from_db(row)
+            error = game.validate(word)
+            if error:
+                embed = discord.Embed(
+                    title="Invalid Word",
+                    colour=ERROR_COLOR,
+                )
+                # "Did you mean?" — only when:
+                #   • the sole problem is "not in dictionary" (not wrong letter / already used)
+                #   • the typed word already starts with the required letter
+                #     (if it doesn't, Hamming matches are against the wrong first letter;
+                #      the chain error message already tells them the correct letter)
+                suggestion = None
+                if (
+                    "not in the word list" in error
+                    and game.next_letter
+                    and word[0] == game.next_letter
+                ):
+                    # Candidates: valid words starting with next_letter, not yet used
+                    suggestion = closest_word(word, game.next_letter, set(game.words_used))
+
+                desc = f"{ctx_or_msg.author.mention} — {error}"
+                if suggestion:
+                    desc += f"\n💡 Did you mean **{suggestion}**?"
+                embed.description = desc
+                if game.next_letter:
+                    embed.set_footer(text=f"Next word must start with: {game.next_letter}")
+                await send(embed=embed)
+                return
+
+            total, base_pts, tier_label, stars = game.play(word)
+
+            await db.update_chain_game(game.game_id, game.words_used, game.next_letter or "")
+            await db.add_chain_move(game.game_id, uid, username, word)
+            await db.upsert_user(uid, gid, username)
+
+            moves = await db.get_chain_moves(game.game_id)
+
+            # ── Streak bonus ──────────────────────────────────────────────────
+            streak_count = 0
+            for m in reversed(moves[:-1]):
+                if m["user_id"] == uid:
+                    streak_count += 1
+                else:
+                    break
+            streak_bonus = 1 if streak_count >= 1 else 0
+            total_final  = total + streak_bonus
+
+            # ── Spotlight bonus ───────────────────────────────────────────────
+            spotlight_bonus = 0
+            try:
+                spotlight = await db.get_spotlight(gid)
+                today_str = datetime.now(tz=ZoneInfo("UTC")).strftime("%Y-%m-%d")
+                if (spotlight
+                        and spotlight.get("spotlight_date") == today_str
+                        and spotlight.get("user_id") == uid
+                        and not spotlight.get("claimed")):
+                    spotlight_bonus = 5
+                    await db.claim_spotlight(gid)
+            except Exception:
+                pass  # spotlight is non-critical
+
+            total_awarded = total_final + spotlight_bonus
+            await db.increment_stat(uid, gid, "chain_points", total_awarded)
+            await db.increment_stat(uid, gid, "chain_words")
+            await db.log_word(gid, uid, word)
+
+            user_stats = await db.get_user_stats(uid, gid)
+            if user_stats is not None and game.chain_length > (user_stats.get("longest_chain") or 0):
+                await db.update_longest_chain(uid, gid, game.chain_length)
+
+            remaining = (
+                remaining_for_letter(game.next_letter, set(game.words_used))
+                if game.next_letter else None
+            )
+
+            # ── Auto-end: no words remain ─────────────────────────────────────
+            if remaining == 0:
+                _active_game_channels.discard((gid, cid))
+                await db.update_chain_game(
+                    game.game_id, game.words_used, game.next_letter or "", "ended"
+                )
+                seen: set[str] = set()
+                for m in moves:
+                    if m["user_id"] not in seen:
+                        seen.add(m["user_id"])
+                        await db.update_longest_chain(m["user_id"], gid, game.chain_length)
+
+                milestone_note  = " *(+2 milestone bonus!)*" if total > base_pts else ""
+                streak_note     = f" 🔥 *+1 streak ({streak_count + 1} in a row!)*" if streak_bonus else ""
+                spotlight_note  = f" 🌟 *+{spotlight_bonus} spotlight bonus!*" if spotlight_bonus else ""
+                embed = discord.Embed(
+                    title=f"🏁 Chain Complete — Game #{game.game_id}",
+                    colour=discord.Colour.orange(),
+                    description=(
+                        f"✅ **{username}** played `{word}` "
+                        f"({stars} **+{total_awarded} pt{'s' if total_awarded != 1 else ''}**)"
+                        f"{milestone_note}{streak_note}{spotlight_note}\n\n"
+                        f"💀 **No more words start with `{game.next_letter}`** — dictionary exhausted!\n"
+                        f"Chain ends at **{game.chain_length}** word(s). Well played!\n\n"
+                        "Use `/chain start` to begin a new game."
+                    ),
+                )
+                await send(embed=embed)
+                if game.chain_length > 0:
+                    recap_view = ChainRecapView(game.words_used, game.game_id)
+                    await _try_channel_send(
+                        channel, "📜 **Final Chain Recap:**",
+                        recap_view.build_embed(),
+                        recap_view if recap_view.total_pages > 1 else None,
+                    )
+                asyncio.create_task(self._post_definition(channel, word))
+                return
+
+            # ── Normal play response ──────────────────────────────────────────
+            embed = chain_status_embed(
+                game.words_used, game.next_letter or "?", moves, game.game_id, remaining, game.game_mode
+            )
+            milestone_note = " *(+2 milestone bonus!)*" if total > base_pts else ""
+            streak_note    = f" 🔥 *+1 streak ({streak_count + 1} in a row!)*" if streak_bonus else ""
+            spotlight_note = f" 🌟 *+{spotlight_bonus} spotlight bonus!*" if spotlight_bonus else ""
+            desc = (
+                f"✅ **{username}** played `{word}` "
+                f"— {stars} **+{total_awarded} pt{'s' if total_awarded != 1 else ''}**"
+                f"{milestone_note}{streak_note}{spotlight_note}"
+            )
+            if stars == "★★★":
+                desc += f"\n✨ **Rare word spotlight!** `{word}` — {tier_label}, {base_pts} base pts."
+            embed.description = desc
+            await send(embed=embed)
+
+        # ── Milestone recap (outside lock) ────────────────────────────────────
+        if game.chain_length % 100 == 0:
+            recap_view = ChainRecapView(game.words_used, game.game_id)
+            await _try_channel_send(
+                channel,
+                f"🎉 **{game.chain_length}-word milestone!** Here's the chain so far:",
+                recap_view.build_embed(),
+                recap_view if recap_view.total_pages > 1 else None,
+            )
+
+        asyncio.create_task(self._post_definition(channel, word))
+
+    async def _post_definition(self, channel: discord.abc.Messageable, word: str) -> None:
+        """Post word definition from the pre-populated DB cache. No runtime API calls."""
+        try:
+            defn = await db.get_word_definition(word)
+            if defn and defn.get("meaning"):
+                text = worddef.format_definition(word, defn)
+                await channel.send(text)
+        except Exception as exc:
+            log.warning("Definition post failed for %s: %s", word, exc)
+
+    # ── Direct message listener ────────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        if not message.guild:
+            return
+        # Only try exact 5-letter alphabetic messages
+        content = message.content.strip()
+        if not (len(content) == 5 and content.isalpha()):
+            return
+        gid = str(message.guild.id)
+        cid = str(message.channel.id)
+        # Quick cache check before any DB call
+        if (gid, cid) not in _active_game_channels:
+            return
+        await self._process_play(
+            gid, cid,
+            str(message.author.id),
+            message.author.display_name,
+            content.upper(),
+            message,
+        )
+
     # ── /chain start ──────────────────────────────────────────────────────────
     @chain.command(name="start", description="Start a word-chain game in this channel")
     async def start(
@@ -191,7 +433,8 @@ class ChainCog(commands.Cog):
             colour=CHAIN_COLOR,
             description=(
                 "**How to play**\n"
-                "• `/chain play <word>` — add a 5-letter word to the chain\n"
+                "• Just **type a 5-letter word** in this channel to play\n"
+                "• Or use `/chain play <word>` if you prefer the slash command\n"
                 f"• Each word must start with the **{mode_desc}** of the previous word\n"
                 "  e.g. `SENSE` → `ENTER` → `ROVER` → `RANGE` → …\n"
                 "• Words must exist in the dictionary · no repeats · any player can join!\n\n"
@@ -203,9 +446,10 @@ class ChainCog(commands.Cog):
         )
         embed.set_footer(text=f"Game #{game_id} | Mode: {mode_desc} | /chain end to stop")
         await ctx.followup.send(embed=embed)
+        _active_game_channels.add((gid, cid))
 
     # ── /chain play ───────────────────────────────────────────────────────────
-    @chain.command(name="play", description="Play a word in the active chain game")
+    @chain.command(name="play", description="Play a word in the active chain game (or just type it in the channel!)")
     async def play(
         self,
         ctx: discord.ApplicationContext,
@@ -215,139 +459,14 @@ class ChainCog(commands.Cog):
         if ctx.guild is None:
             await ctx.followup.send("Use this command inside a server.")
             return
-
-        uid  = str(ctx.author.id)
-        gid  = str(ctx.guild.id)
-        cid  = str(ctx.channel.id)
-        word = word.strip().upper()
-
-        # ── Per-user rate limit ───────────────────────────────────────────────
-        rk   = f"{uid}:{gid}"
-        now  = time.monotonic()
-        wait = _PLAY_COOLDOWN - (now - _user_last_play.get(rk, 0))
-        if wait > 0:
-            await ctx.followup.send(
-                f"⏳ Wait **{wait:.1f}s** before playing again.", ephemeral=True
-            )
-            return
-        _user_last_play[rk] = now
-
-        # ── Serialise concurrent plays per channel to prevent TOCTOU races ───
-        async with _channel_locks[(gid, cid)]:
-            row = await db.get_active_chain(gid, cid)
-            if not row:
-                await ctx.followup.send(
-                    "No active chain game here. Use `/chain start` to begin."
-                )
-                return
-
-            game  = ChainGame.from_db(row)
-            error = game.validate(word)
-            if error:
-                embed = discord.Embed(
-                    title="Invalid Word",
-                    description=f"{ctx.author.mention} — {error}",
-                    colour=ERROR_COLOR,
-                )
-                if game.next_letter:
-                    embed.set_footer(text=f"Next word must start with: {game.next_letter}")
-                await ctx.followup.send(embed=embed)
-                return
-
-            total, base_pts, tier_label, stars = game.play(word)
-
-
-            await db.update_chain_game(game.game_id, game.words_used, game.next_letter or "")
-            await db.add_chain_move(game.game_id, uid, ctx.author.display_name, word)
-            await db.upsert_user(uid, gid, ctx.author.display_name)
-
-            # Fetch moves (includes the just-added move at the end)
-            moves = await db.get_chain_moves(game.game_id)
-
-            # ── Streak bonus: +1 if player played the previous word too ──────
-            streak_count = 0
-            for m in reversed(moves[:-1]):
-                if m["user_id"] == uid:
-                    streak_count += 1
-                else:
-                    break
-            streak_bonus = 1 if streak_count >= 1 else 0
-            total_final  = total + streak_bonus
-
-            await db.increment_stat(uid, gid, "chain_points", total_final)
-            await db.increment_stat(uid, gid, "chain_words")
-            await db.log_word(gid, uid, word)
-
-            # ── Update longest_chain immediately if this is user's new best ──
-            user_stats = await db.get_user_stats(uid, gid)
-            if user_stats is not None and game.chain_length > (user_stats.get("longest_chain") or 0):
-                await db.update_longest_chain(uid, gid, game.chain_length)
-
-            remaining = (
-                remaining_for_letter(game.next_letter, set(game.words_used))
-                if game.next_letter else None
-            )
-
-            # ── Auto-end: no words remain for the required next letter ───────
-            if remaining == 0:
-                await db.update_chain_game(
-                    game.game_id, game.words_used, game.next_letter or "", "ended"
-                )
-                seen: set[str] = set()
-                for m in moves:
-                    if m["user_id"] not in seen:
-                        seen.add(m["user_id"])
-                        await db.update_longest_chain(m["user_id"], gid, game.chain_length)
-
-                milestone_note = " *(+2 milestone bonus!)*" if total > base_pts else ""
-                streak_note    = f" 🔥 *+1 streak ({streak_count + 1} in a row!)*" if streak_bonus else ""
-                embed = discord.Embed(
-                    title=f"🏁 Chain Complete — Game #{game.game_id}",
-                    colour=discord.Colour.orange(),
-                    description=(
-                        f"✅ **{ctx.author.display_name}** played `{word}` "
-                        f"({stars} **+{total_final} pt{'s' if total_final != 1 else ''}**)"
-                        f"{milestone_note}{streak_note}\n\n"
-                        f"💀 **No more words start with `{game.next_letter}`** — the dictionary is exhausted!\n"
-                        f"The chain ends here at **{game.chain_length}** word(s). Well played!\n\n"
-                        "Use `/chain start` to begin a new game."
-                    ),
-                )
-                await ctx.followup.send(embed=embed)
-                if game.chain_length > 0:
-                    recap_view = ChainRecapView(game.words_used, game.game_id)
-                    await _try_channel_send(
-                        ctx.channel,
-                        "📜 **Final Chain Recap:**",
-                        recap_view.build_embed(),
-                        recap_view if recap_view.total_pages > 1 else None,
-                    )
-                return
-
-            # ── Normal play response ──────────────────────────────────────────
-            embed = chain_status_embed(
-                game.words_used, game.next_letter or "?", moves, game.game_id, remaining, game.game_mode
-            )
-            milestone_note = " *(+2 milestone bonus!)*" if total > base_pts else ""
-            streak_note    = f" 🔥 *+1 streak ({streak_count + 1} in a row!)*" if streak_bonus else ""
-            desc = (
-                f"✅ **{ctx.author.display_name}** played `{word}` "
-                f"— {stars} **+{total_final} pt{'s' if total_final != 1 else ''}**{milestone_note}{streak_note}"
-            )
-            if stars == "★★★":
-                desc += f"\n✨ **Rare word spotlight!** `{word}` — {tier_label}, {base_pts} base pts."
-            embed.description = desc
-            await ctx.followup.send(embed=embed)
-
-        # ── Milestone recap every 100 words (outside lock — state already saved) ──
-        if game.chain_length % 100 == 0:
-            recap_view = ChainRecapView(game.words_used, game.game_id)
-            await _try_channel_send(
-                ctx.channel,
-                f"🎉 **{game.chain_length}-word milestone!** Here's the chain so far:",
-                recap_view.build_embed(),
-                recap_view if recap_view.total_pages > 1 else None,
-            )
+        await self._process_play(
+            str(ctx.guild.id),
+            str(ctx.channel.id),
+            str(ctx.author.id),
+            ctx.author.display_name,
+            word.strip().upper(),
+            ctx,
+        )
 
     # ── /chain status ─────────────────────────────────────────────────────────
     @chain.command(name="status", description="Show the current word chain")
@@ -497,6 +616,7 @@ class ChainCog(commands.Cog):
             tally.setdefault(m["username"], []).append(m["word"])
 
         embed = chain_end_embed(game.game_id, game.chain_length, tally)
+        _active_game_channels.discard((gid, str(ctx.channel.id)))
         await ctx.followup.send(embed=embed)
 
         if game.chain_length > 0:
@@ -558,6 +678,7 @@ class ChainCog(commands.Cog):
             game  = ChainGame.from_db(row)
             moves = await db.get_chain_moves(g_id)
             await db.update_chain_game(g_id, game.words_used, game.next_letter or "", "ended")
+            _active_game_channels.discard((gid, g_cid))
 
             seen: set[str] = set()
             for m in moves:
@@ -632,7 +753,8 @@ class ChainCog(commands.Cog):
                 "• 🎉 **Milestone recap** — full chain shown every 100 words\n\n"
                 "**Commands**\n"
                 "`/chain start [mode]` — start a game\n"
-                "`/chain play <word>` — add a word\n"
+                "**type a word** — play directly in the channel (no slash command needed!)\n"
+                "`/chain play <word>` — alternative: use the slash command to play\n"
                 "`/chain status` — view the current chain and remaining words\n"
                 "`/chain words <letter>` — see all words used for a letter (paginated)\n"
                 "`/chain hint` — ask for a hint (visible to all — use wisely!)\n"

@@ -25,6 +25,7 @@ from discord import SlashCommandGroup
 from utils import database as db
 from utils.wordhistory import get_word_fact
 from utils.display import STATS_COLOR, CHAIN_COLOR
+from cogs.chain_cog import _active_game_channels as _chain_channels
 
 log = logging.getLogger("sigmoidian.reminder")
 
@@ -116,7 +117,7 @@ def _build_reminder_embed(
             status_val = (
                 f"🔗 **Game #{g['id']}** is live in {channel_ref}!\n"
                 f"Chain length: **{chain_len}** · last word: **{last_word}** · next letter: **{next_letter}**\n"
-                f"Use `/chain play <word>` to jump in, or tap **📋 Chain Status** below."
+                f"Just type a 5-letter word in {channel_ref} to play, or tap **📋 Chain Status** below."
             )
         else:
             lines = []
@@ -128,7 +129,7 @@ def _build_reminder_embed(
             status_val = (
                 f"🔗 **{len(active_games)} games** are running right now!\n"
                 + "\n".join(lines)
-                + "\nUse `/chain play <word>` in any game channel to join."
+                + "\nJust type a 5-letter word in any game channel to join!"
             )
     else:
         status_val = (
@@ -186,7 +187,7 @@ class ReminderView(discord.ui.View):
         if existing:
             await interaction.followup.send(
                 f"A game is already running here (Game #{existing['id']})!\n"
-                "Use `/chain play <word>` to jump in.",
+                "Just type a 5-letter word in the channel to play.",
                 ephemeral=True,
             )
             return
@@ -194,6 +195,7 @@ class ReminderView(discord.ui.View):
         game_id = await db.create_chain_game(
             gid, cid, "last", started_by=str(interaction.user.id)
         )
+        _chain_channels.add((gid, cid))
         await db.upsert_user(str(interaction.user.id), gid, interaction.user.display_name)
 
         embed = discord.Embed(
@@ -202,7 +204,7 @@ class ReminderView(discord.ui.View):
             description=(
                 f"**{interaction.user.display_name}** kicked off today's game!\n\n"
                 "**How to play**\n"
-                "• `/chain play <word>` — add a 5-letter word to the chain\n"
+                "• Just **type a 5-letter word** in this channel to play!\n"
                 "• Each word must start with the **last letter** of the previous word\n"
                 "  e.g. `SENSE` → `ENTER` → `ROVER` → `RANGE` → …\n"
                 "• Words must be in the dictionary · no repeats · anyone can join!\n\n"
@@ -218,7 +220,7 @@ class ReminderView(discord.ui.View):
             log.warning("ReminderView: cannot announce game in channel %s: %s", cid, exc)
 
         await interaction.followup.send(
-            f"✅ Game #{game_id} started! Use `/chain play <word>` to jump in.",
+            f"✅ Game #{game_id} started! Just type a 5-letter word in the channel to play.",
             ephemeral=True,
         )
 
@@ -290,7 +292,7 @@ class ReminderView(discord.ui.View):
             lines.append(
                 f"**Game #{g['id']}** — <#{g['channel_id']}>\n"
                 f"Length: **{chain_len}** · Last word: **{last_word}** · Next: **{next_letter}**\n"
-                f"Use `/chain play <word>` in that channel to join!"
+                f"Just type a 5-letter word in that channel to join!"
             )
 
         embed = discord.Embed(
@@ -317,7 +319,7 @@ class ReminderView(discord.ui.View):
         )
         if not stats or stats.get("chain_words", 0) == 0:
             await interaction.followup.send(
-                "You haven't played yet! Jump into an active game with `/chain play <word>`, "
+                "You haven't played yet! Jump into an active game by typing a 5-letter word in the game channel, "
                 "or ask a server admin to start one.",
                 ephemeral=True,
             )
@@ -344,10 +346,13 @@ class ReminderCog(commands.Cog):
 
     def __init__(self, bot: discord.Bot):
         self.bot = bot
+        self._spotlight_schedule: dict[str, tuple[str, int]] = {}
         self._daily_task.start()
+        self._spotlight_task.start()
 
     def cog_unload(self):
         self._daily_task.cancel()
+        self._spotlight_task.cancel()
 
     # ── Background task ────────────────────────────────────────────────────────
 
@@ -363,6 +368,102 @@ class ReminderCog(commands.Cog):
         await self.bot.wait_until_ready()
         # Event loop is guaranteed running here — safe to instantiate View
         self.bot.add_view(ReminderView())
+
+    @tasks.loop(minutes=15)
+    async def _spotlight_task(self):
+        try:
+            await self._check_spotlight()
+        except Exception as exc:
+            log.error("Spotlight task crashed: %s", exc, exc_info=True)
+
+    @_spotlight_task.before_loop
+    async def _before_spotlight_task(self):
+        await self.bot.wait_until_ready()
+
+    async def _check_spotlight(self) -> None:
+        guilds_cfg = await db.get_all_reminder_guilds()
+        if not guilds_cfg:
+            return
+
+        now_utc = datetime.now(tz=ZoneInfo("UTC"))
+
+        for cfg in guilds_cfg:
+            guild_id   = cfg["guild_id"]
+            tz_name    = cfg.get("timezone") or "UTC"
+            try:
+                tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                tz = ZoneInfo("UTC")
+
+            now_local    = now_utc.astimezone(tz)
+            today_str    = now_local.strftime("%Y-%m-%d")
+            current_min  = now_local.hour * 60 + now_local.minute
+
+            # Only consider 10 AM – 8 PM local time (minutes 600 – 1200)
+            if not (600 <= current_min <= 1200):
+                continue
+
+            # Get or generate today's spotlight minute for this guild
+            sched = self._spotlight_schedule.get(guild_id)
+            if sched is None or sched[0] != today_str:
+                scheduled_min = random.randint(600, 1200)
+                self._spotlight_schedule[guild_id] = (today_str, scheduled_min)
+                sched = (today_str, scheduled_min)
+
+            if current_min < sched[1]:
+                continue  # not time yet
+
+            # Check if spotlight already sent today
+            existing = await db.get_spotlight(guild_id)
+            if existing and existing.get("spotlight_date") == today_str:
+                continue
+
+            # Pick a random past player
+            players = await db.get_active_players(guild_id)
+            if not players:
+                continue
+
+            player = random.choice(players)
+            uid    = player["user_id"]
+
+            # Find a channel to send to — prefer active game channel, fall back to reminder channel
+            active_games = await db.get_active_chains_for_guild(guild_id)
+            if active_games:
+                target_cid = active_games[0]["channel_id"]
+            elif cfg.get("reminder_channel_id"):
+                target_cid = cfg["reminder_channel_id"]
+            else:
+                continue
+
+            guild = self.bot.get_guild(int(guild_id))
+            if not guild:
+                continue
+
+            target_channel = guild.get_channel(int(target_cid))
+            if target_channel is None:
+                try:
+                    target_channel = await guild.fetch_channel(int(target_cid))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+
+            await db.set_spotlight(guild_id, today_str, uid, target_cid)
+
+            embed = discord.Embed(
+                title="🌟 Daily Spotlight",
+                colour=discord.Colour.gold(),
+                description=(
+                    f"<@{uid}> — you've been chosen as today's spotlight player!\n\n"
+                    "Play any word in this channel within the hour for a **+5 bonus points** reward.\n"
+                    "Just type a 5-letter word to play. Make it count! 🎯"
+                ),
+            )
+            embed.set_footer(text="Bonus applies to your next word only · Spotlight is for you alone!")
+
+            try:
+                await target_channel.send(embed=embed)
+                log.info("Spotlight sent → guild %s, user %s", guild_id, uid)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                log.warning("Cannot send spotlight to %s: %s", target_cid, exc)
 
     async def _check_and_send(self):
         guilds_cfg = await db.get_all_reminder_guilds()
@@ -512,7 +613,7 @@ class ReminderCog(commands.Cog):
                 description=(
                     f"🔗 **Game #{g['id']}** is live here!\n\n"
                     f"Chain length: **{chain_len}** · Last word: **{last_word}** · Next letter: **{next_letter}**\n\n"
-                    "Use `/chain play <word>` to keep the chain going today!"
+                    "Just type a 5-letter word here to keep the chain going today!"
                 ),
             )
             embed.set_footer(text="Sigmoidian Daily Reminder · /chain status for the full view")

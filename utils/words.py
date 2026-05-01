@@ -139,5 +139,36 @@ def word_count() -> int:
     return len(VALID_WORDS)
 
 
+def _hamming(a: str, b: str) -> int:
+    """Count differing positions between two equal-length strings."""
+    return sum(c1 != c2 for c1, c2 in zip(a, b))
+
+
+def closest_word(word: str, letter: str, used_words: set[str], max_dist: int = 2) -> str | None:
+    """
+    Return the closest unused valid word to `word` starting with `letter`,
+    within `max_dist` Hamming distance. Returns None if no match found.
+    Since all words are 5 letters, Hamming distance is sufficient.
+    """
+    word = word.upper()
+    letter = letter.upper()
+    candidates = LETTER_INDEX.get(letter, set()) - used_words
+    if not candidates:
+        return None
+
+    best: str | None = None
+    best_d = max_dist + 1
+
+    for c in candidates:
+        if len(c) != len(word):
+            continue
+        d = _hamming(word, c)
+        if d < best_d:
+            best_d = d
+            best = c
+
+    return best
+
+
 # Load on import
 _load()

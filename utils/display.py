@@ -86,7 +86,7 @@ def chain_status_embed(
 
     mode_label = _MODE_LABELS.get(game_mode, game_mode)
     embed.set_footer(
-        text=f"Chain length: {len(words)} | Mode: {mode_label} | /chain play <word>"
+        text=f"Chain length: {len(words)} | Mode: {mode_label} | Type a word to play"
     )
     return embed
 
