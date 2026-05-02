@@ -17,6 +17,7 @@ from utils.display import (
     ERROR_COLOR, CHAIN_COLOR, OK_COLOR, STATS_COLOR,
 )
 from utils.words import is_valid, add_word, remove_word, word_count, remaining_for_letter, get_hints, closest_word
+from utils.external_leaderboards import award_points_externally
 from game.chain import ChainGame, VALID_MODES
 
 log = logging.getLogger("sigmoidian.chain")
@@ -523,6 +524,7 @@ class ChainCog(commands.Cog):
             total_awarded = total_final + spotlight_bonus
             await db.increment_stat(uid, gid, "chain_points", total_awarded)
             await db.increment_stat(uid, gid, "chain_words")
+            await award_points_externally(uid, gid, username, total_awarded, str(game.game_id))
             await db.log_word(gid, uid, word)
 
             user_stats = await db.get_user_stats(uid, gid)
