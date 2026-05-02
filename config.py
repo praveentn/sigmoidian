@@ -26,7 +26,9 @@ def _leaderboard_config(name: str) -> dict | None:
     key = os.getenv(f"{name}_API_KEY", "").strip()
     if not url or not key:
         return None
-    return {"url": url, "api_key": key}
+    raw_guilds = os.getenv(f"{name}_GUILDS", "").strip()
+    guilds = {g.strip() for g in raw_guilds.split(",") if g.strip()} if raw_guilds else set()
+    return {"url": url, "api_key": key, "guilds": guilds}  # empty set = all guilds allowed
 
 LEADERBOARD_SERVICES: dict[str, dict] = {
     name: cfg

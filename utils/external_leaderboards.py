@@ -28,6 +28,8 @@ async def award_points_externally(
 
     async with aiohttp.ClientSession() as session:
         for name, cfg in LEADERBOARD_SERVICES.items():
+            if cfg["guilds"] and str(guild_id) not in cfg["guilds"]:
+                continue
             headers = {"Authorization": f"Bearer {cfg['api_key']}"}
             try:
                 async with session.post(
